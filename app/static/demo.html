@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAG Chatbot — Widget Demo</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 48px auto; padding: 0 16px; color: #1f2937; }
+      code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Widget demo page</h1>
+    <p>
+      This page loads the chatbot widget from the same backend. In production you
+      embed the same one-liner on your real site:
+    </p>
+    <p><code>&lt;script src="https://your-host/widget.js" defer&gt;&lt;/script&gt;</code></p>
+    <p>
+      Click the chat bubble in the bottom-right corner. The widget reports this
+      page's domain to the backend, which crawls it and answers from the content.
+    </p>
+
+    <!--
+      The embed. In production you only need: <script src="/widget.js" defer></script>
+      and the widget auto-detects the real domain.
+
+      data-domain is a LOCAL TESTING override so this 127.0.0.1 page can target a
+      real crawled site. Remove it when embedding on the actual website.
+    -->
+    <script
+      src="/widget.js"
+      data-title="Ask about HomelyHealthy"
+      data-accent="#2563eb"
+      data-domain="homelyhealthy.in"
+      defer
+    ></script>
+  </body>
+</html>

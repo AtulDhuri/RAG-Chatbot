@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Website Assistant</title>
+    <style>
+      :root { --accent: #2563eb; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: #f3f4f6;
+        color: #111827;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 100%;
+        max-width: 640px;
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.1);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        background: var(--accent);
+        color: #fff;
+        padding: 18px 22px;
+      }
+      header h1 { margin: 0; font-size: 18px; }
+      header p { margin: 4px 0 0; font-size: 13px; opacity: 0.9; }
+
+      .setup { padding: 22px; display: flex; gap: 10px; border-bottom: 1px solid #e5e7eb; }
+      .setup input {
+        flex: 1;
+        border: 1px solid #d1d5db;
+        border-radius: 10px;
+        padding: 12px 14px;
+        font-size: 15px;
+        outline: none;
+      }
+      .setup input:focus { border-color: var(--accent); }
+      .setup button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 10px;
+        padding: 0 22px;
+        font-size: 15px;
+        cursor: pointer;
+      }
+      .setup button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      .status { padding: 10px 22px; font-size: 13px; color: #6b7280; min-height: 20px; }
+      .status.err { color: #b91c1c; }
+
+      .chat { display: none; flex-direction: column; height: 460px; }
+      .chat.active { display: flex; }
+      .messages {
+        flex: 1;
+        padding: 18px 22px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: #f7f8fa;
+      }
+      .msg {
+        max-width: 85%;
+        padding: 10px 13px;
+        border-radius: 12px;
+        font-size: 14px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+      .bot { align-self: flex-start; background: #fff; color: #1f2937; border: 1px solid #e5e7eb; border-bottom-left-radius: 4px; }
+      .sources { font-size: 11px; color: #6b7280; margin-top: 6px; }
+      .sources a { color: var(--accent); text-decoration: none; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .typing { align-self: flex-start; color: #6b7280; font-size: 13px; font-style: italic; }
+
+      .composer { display: flex; gap: 10px; padding: 14px 22px; border-top: 1px solid #e5e7eb; background: #fff; }
+      .composer input {
+        flex: 1;
+        border: 1px solid #d1d5db;
+        border-radius: 10px;
+        padding: 11px 13px;
+        font-size: 14px;
+        outline: none;
+      }
+      .composer input:focus { border-color: var(--accent); }
+      .composer button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 10px;
+        padding: 0 18px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <header>
+        <h1>Website Assistant</h1>
+        <p>Enter a website URL, then ask questions about it.</p>
+      </header>
+
+      <div class="setup">
+        <input id="url" type="text" placeholder="https://example.com" autocomplete="off" />
+        <button id="submit">Submit</button>
+      </div>
+      <div id="status" class="status"></div>
+
+      <div id="chat" class="chat">
+        <div id="messages" class="messages"></div>
+        <div class="composer">
+          <input id="question" type="text" placeholder="Ask a question..." aria-label="Question" />
+          <button id="send">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var API_BASE = window.location.origin;
+        var DOMAIN = "";
+
+        var urlInput = document.getElementById("url");
+        var submitBtn = document.getElementById("submit");
+        var statusEl = document.getElementById("status");
+        var chat = document.getElementById("chat");
+        var messages = document.getElementById("messages");
+        var question = document.getElementById("question");
+        var sendBtn = document.getElementById("send");
+
+        submitBtn.addEventListener("click", submitUrl);
+        urlInput.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") submitUrl();
+        });
+        sendBtn.addEventListener("click", send);
+        question.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") send();
+        });
+
+        function normalizeDomain(raw) {
+          raw = (raw || "").trim().toLowerCase();
+          if (!raw) return "";
+          raw = raw.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+          return raw.replace(/^www\./, "");
+        }
+
+        function setStatus(text, isError) {
+          statusEl.textContent = text || "";
+          statusEl.className = "status" + (isError ? " err" : "");
+        }
+
+        function submitUrl() {
+          var d = normalizeDomain(urlInput.value);
+          if (!d || d.indexOf(".") === -1) {
+            setStatus("Please enter a valid URL, e.g. https://example.com", true);
+            return;
+          }
+          DOMAIN = d;
+          submitBtn.disabled = true;
+          setStatus("Reading " + DOMAIN + " ... this can take a moment on the first visit.");
+
+          fetch(API_BASE + "/api/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domain: DOMAIN }),
+          })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              chat.classList.add("active");
+              messages.innerHTML = "";
+              if (data && data.indexed) {
+                setStatus("Ready. Answering from " + DOMAIN + ".");
+                addBot("I've read " + DOMAIN + ". Ask me anything about it.");
+              } else {
+                setStatus("Indexing " + DOMAIN + " in the background. You can ask now.");
+                addBot(
+                  "I'm reading through " + DOMAIN + " now. Ask a question and I'll " +
+                  "answer as soon as it's ready."
+                );
+              }
+              question.focus();
+            })
+            .catch(function () {
+              setStatus("Could not reach the backend. Try again.", true);
+            })
+            .finally(function () {
+              submitBtn.disabled = false;
+            });
+        }
+
+        function send() {
+          var text = question.value.trim();
+          if (!text || !DOMAIN) return;
+          question.value = "";
+          addUser(text);
+          setBusy(true);
+          var typing = addTyping();
+
+          fetch(API_BASE + "/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ domain: DOMAIN, message: text }),
+          })
+            .then(function (r) {
+              if (r.status === 429) throw new Error("rate");
+              return r.json();
+            })
+            .then(function (data) {
+              typing.remove();
+              addBot(data.answer || "Sorry, I couldn't come up with an answer.", data.sources);
+            })
+            .catch(function (err) {
+              typing.remove();
+              addBot(
+                err && err.message === "rate"
+                  ? "You're sending messages too quickly. Please wait a moment."
+                  : "Something went wrong reaching the assistant. Please try again."
+              );
+            })
+            .finally(function () {
+              setBusy(false);
+              question.focus();
+            });
+        }
+
+        function setBusy(b) {
+          sendBtn.disabled = b;
+          question.disabled = b;
+        }
+
+        function addUser(text) {
+          var el = document.createElement("div");
+          el.className = "msg user";
+          el.textContent = text;
+          messages.appendChild(el);
+          scroll();
+        }
+
+        function addBot(text, sources) {
+          var el = document.createElement("div");
+          el.className = "msg bot";
+          el.textContent = text;
+          if (sources && sources.length) {
+            var box = document.createElement("div");
+            box.className = "sources";
+            box.appendChild(document.createTextNode("Sources:"));
+            sources.slice(0, 3).forEach(function (u) {
+              var a = document.createElement("a");
+              a.href = u;
+              a.target = "_blank";
+              a.rel = "noopener noreferrer";
+              a.textContent = u;
+              box.appendChild(a);
+            });
+            el.appendChild(box);
+          }
+          messages.appendChild(el);
+          scroll();
+        }
+
+        function addTyping() {
+          var el = document.createElement("div");
+          el.className = "typing";
+          el.textContent = "Assistant is typing...";
+          messages.appendChild(el);
+          scroll();
+          return el;
+        }
+
+        function scroll() {
+          messages.scrollTop = messages.scrollHeight;
+        }
+      })();
+    </script>
+  </body>
+</html>
