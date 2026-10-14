@@ -164,6 +164,54 @@
           statusEl.className = "status" + (isError ? " err" : "");
         }
 
+        var statusTimer = null;
+
+        // Poll /api/status while a crawl is running so the status line reflects
+        // real progress and flips to "Ready" the moment indexing completes,
+        // instead of showing a stale "indexing in the background" message.
+        function pollStatus() {
+          if (statusTimer) clearTimeout(statusTimer);
+          var domainAtStart = DOMAIN;
+
+          function tick() {
+            // Abort if the user switched to a different site mid-poll.
+            if (DOMAIN !== domainAtStart) return;
+            fetch(
+              API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN)
+            )
+              .then(function (r) { return r.json(); })
+              .then(function (s) {
+                if (!s || DOMAIN !== domainAtStart) return;
+                if (s.phase === "ready" || s.indexed) {
+                  setStatus("Ready. Answering from " + DOMAIN + ".");
+                  return; // stop polling
+                }
+                if (s.phase === "error") {
+                  setStatus("Indexing hit a problem. Answers may be limited.", true);
+                  return; // stop polling
+                }
+                if (s.phase === "embedding") {
+                  setStatus(
+                    "Processing " + DOMAIN + " (" + s.pages_done + " pages read)..."
+                  );
+                } else {
+                  // crawling
+                  var seen = s.pages_known > 0
+                    ? s.pages_done + "/" + s.pages_known
+                    : String(s.pages_done);
+                  setStatus("Reading " + DOMAIN + " - " + seen + " pages crawled...");
+                }
+                statusTimer = setTimeout(tick, 1500);
+              })
+              .catch(function () {
+                // Transient error; try again shortly.
+                statusTimer = setTimeout(tick, 3000);
+              });
+          }
+
+          tick();
+        }
+
         function submitUrl() {
           var d = normalizeDomain(urlInput.value);
           if (!d || d.indexOf(".") === -1) {
@@ -187,11 +235,12 @@
                 setStatus("Ready. Answering from " + DOMAIN + ".");
                 addBot("I've read " + DOMAIN + ". Ask me anything about it.");
               } else {
-                setStatus("Indexing " + DOMAIN + " in the background. You can ask now.");
+                setStatus("Reading " + DOMAIN + " ...");
                 addBot(
                   "I'm reading through " + DOMAIN + " now. Ask a question and I'll " +
                   "answer as soon as it's ready."
                 );
+                pollStatus();  // keep the status line live until indexing finishes
               }
               question.focus();
             })
