@@ -73,6 +73,14 @@
     display:flex;align-items:center;justify-content:space-between;gap:8px}
   .ragc-header-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ragc-close{background:none;border:none;color:#fff;font-size:20px;cursor:pointer;line-height:1}
+  .ragc-status{padding:6px 16px;font-size:12px;background:#eef2ff;color:#3730a3;border-bottom:1px solid #e5e7eb;
+    display:flex;align-items:center;gap:7px}
+  .ragc-status.ragc-ready{background:#ecfdf5;color:#065f46}
+  .ragc-status.ragc-error{background:#fef2f2;color:#991b1b}
+  .ragc-status.ragc-hidden{display:none}
+  .ragc-dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+  .ragc-status.ragc-busy .ragc-dot{animation:ragc-pulse 1s ease-in-out infinite}
+  @keyframes ragc-pulse{0%,100%{opacity:.35}50%{opacity:1}}
   .ragc-body{flex:1;padding:14px;overflow-y:auto;background:#f7f8fa;display:flex;flex-direction:column;gap:10px}
   .ragc-msg{max-width:85%;padding:9px 12px;border-radius:12px;font-size:14px;line-height:1.4;white-space:pre-wrap;
     word-wrap:break-word}
@@ -107,6 +115,9 @@
     '<span class="ragc-header-title">' + escapeHtml(TITLE) + "</span>" +
     '<button class="ragc-close" aria-label="Close">\u00d7</button>' +
     "</div>" +
+    '<div class="ragc-status ragc-hidden" role="status" aria-live="polite">' +
+    '<span class="ragc-dot"></span><span class="ragc-status-text"></span>' +
+    "</div>" +
     '<div class="ragc-body" role="log" aria-live="polite"></div>' +
     '<div class="ragc-footer">' +
     '<input class="ragc-input" type="text" placeholder="Type your question..." aria-label="Message"/>' +
@@ -120,10 +131,14 @@
   var input = panel.querySelector(".ragc-input");
   var sendBtn = panel.querySelector(".ragc-send");
   var closeBtn = panel.querySelector(".ragc-close");
+  var statusEl = panel.querySelector(".ragc-status");
+  var statusText = panel.querySelector(".ragc-status-text");
 
   // Kick off indexing as soon as the widget loads, so the site is being read
-  // before the visitor even opens the chat.
+  // before the visitor even opens the chat. Then poll for progress so the user
+  // can see whether the site is still being read or ready to answer.
   registerDomain();
+  pollStatus();
 
   // ------------------------- behavior -------------------------
   launcher.addEventListener("click", togglePanel);
@@ -154,6 +169,60 @@
     }).catch(function () {
       /* non-fatal: chat will register on demand too */
     });
+  }
+
+  // Show a status line: "state" is "busy" | "ready" | "error".
+  function setStatus(text, state) {
+    if (!statusEl) return;
+    statusText.textContent = text;
+    statusEl.className =
+      "ragc-status" +
+      (state === "ready" ? " ragc-ready" : "") +
+      (state === "error" ? " ragc-error" : "") +
+      (state === "busy" ? " ragc-busy" : "");
+  }
+
+  var statusTimer = null;
+
+  // Poll /api/status so the user can see whether the site is still being read
+  // or is ready to answer. Stops once indexing is done.
+  function pollStatus() {
+    if (!API_BASE || !DOMAIN) return;
+    if (statusTimer) clearTimeout(statusTimer);
+
+    function tick() {
+      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN))
+        .then(function (r) { return r.json(); })
+        .then(function (s) {
+          if (!s) return;
+          if (s.phase === "ready" || s.indexed) {
+            setStatus("Ready to answer", "ready");
+            // Briefly show "ready", then hide so it doesn't take up space.
+            statusTimer = setTimeout(function () {
+              if (statusEl) statusEl.classList.add("ragc-hidden");
+            }, 2500);
+            return; // stop polling
+          }
+          if (s.phase === "error") {
+            setStatus("Had trouble reading the site", "error");
+            return; // stop polling
+          }
+          if (s.phase === "embedding") {
+            setStatus("Processing content (" + s.pages_done + " pages)...", "busy");
+          } else {
+            var seen = s.pages_known > 0
+              ? s.pages_done + "/" + s.pages_known
+              : String(s.pages_done || 0);
+            setStatus("Reading the site - " + seen + " pages...", "busy");
+          }
+          statusTimer = setTimeout(tick, 1500);
+        })
+        .catch(function () {
+          statusTimer = setTimeout(tick, 3000);
+        });
+    }
+
+    tick();
   }
 
   function send() {

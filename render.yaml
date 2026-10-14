@@ -2,16 +2,20 @@ services:
   - type: web
     name: rag-chatbot
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     # The container listens on $PORT, which Render injects automatically.
     envVars:
       # Set the actual value in the Render dashboard (kept secret, never in git).
       - key: OPENAI_API_KEY
         sync: false
-    # Persist the ChromaDB vector store across deploys. Remove this block if you
-    # are fine re-crawling on every deploy (ephemeral disk).
-    disk:
-      name: chroma-data
-      mountPath: /app/data
-      sizeGB: 1
+    # NOTE: Persistent disks are a PAID Render feature and are not available on
+    # the free plan. On free, the ChromaDB index is ephemeral: it is rebuilt by
+    # crawling on demand and is wiped on each deploy / instance restart. The app
+    # handles this gracefully (it re-crawls when content is missing).
+    #
+    # To keep the index across deploys, upgrade the plan and uncomment:
+    # disk:
+    #   name: chroma-data
+    #   mountPath: /app/data
+    #   sizeGB: 1

@@ -20,8 +20,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy the application code.
 COPY . .
 
-# ChromaDB persists here. On Render, mount a Disk at /app/data to keep the index
-# across deploys; without a disk it is ephemeral and re-crawls on demand.
+# ChromaDB persists here. On Render's FREE plan there is no persistent disk, so
+# this path is ephemeral: the index is rebuilt by crawling on demand and wiped
+# on each deploy/restart (the app handles this). On a PAID plan, mount a Disk at
+# /app/data to keep the index across deploys.
 ENV CHROMA_PERSIST_DIR=/app/data/chroma
 
 # Render provides $PORT at runtime; default to 8000 for local `docker run`.
