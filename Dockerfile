@@ -11,9 +11,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-# The base image already includes the browser binaries, but this is a cheap,
-# idempotent guarantee that the Chromium build matching this Playwright is present.
-RUN playwright install chromium
+# NOTE: We deliberately do NOT run `playwright install` here. The base image
+# (pinned to the same Playwright version, v1.49.1) already ships Chromium and
+# every system library at the location Playwright expects. Re-running the
+# install can fetch the browser to a different cache path and cause a runtime
+# "Executable doesn't exist" error.
 
 # Copy the application code.
 COPY . .
