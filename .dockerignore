@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets — set these as env vars in Render instead
+.env
+
+# Local vector store / data — ephemeral, rebuilt at runtime
+data/
+*.sqlite3
+
+# Git / editor / OS
+.git/
+.gitignore
+.DS_Store
+.idea/
+.vscode/
