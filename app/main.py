@@ -55,6 +55,17 @@ class RegisterResponse(BaseModel):
     indexed: bool
 
 
+class StatusResponse(BaseModel):
+    domain: str
+    phase: str  # "crawling" | "embedding" | "ready" | "error" | "idle"
+    indexing: bool
+    indexed: bool
+    pages_done: int
+    pages_known: int
+    chunks: int
+    last_url: str
+
+
 class ChatRequest(BaseModel):
     domain: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
@@ -80,6 +91,23 @@ def register(req: RegisterRequest):
         domain=domain,
         status=status,
         indexed=vectorstore.is_indexed(domain),
+    )
+
+
+@app.get("/api/status", response_model=StatusResponse)
+def status(domain: str):
+    """Crawl/index progress for a domain, suitable for client-side polling."""
+    domain = normalize_domain(domain)
+    snap = indexer.get_progress(domain)
+    return StatusResponse(
+        domain=domain,
+        phase=snap["phase"],
+        indexing=snap["indexing"],
+        indexed=vectorstore.is_indexed(domain),
+        pages_done=snap["pages_done"],
+        pages_known=snap["pages_known"],
+        chunks=snap["chunks"],
+        last_url=snap["last_url"],
     )
 
 
@@ -132,5 +160,11 @@ def root():
 def api_info():
     return {
         "service": "RAG Website Chatbot",
-        "endpoints": ["/api/register", "/api/chat", "/widget.js", "/health"],
+        "endpoints": [
+            "/api/register",
+            "/api/status",
+            "/api/chat",
+            "/widget.js",
+            "/health",
+        ],
     }

@@ -16,10 +16,55 @@ _settings = get_settings()
 _in_progress: set[str] = set()
 _lock = threading.Lock()
 
+# Per-domain progress snapshots, so the API can report crawl status to clients.
+# Shape: {domain: {"phase", "pages_done", "pages_known", "chunks", "last_url"}}.
+# "phase" is one of: "crawling", "embedding", "ready", "error".
+_progress: dict[str, dict] = {}
+
 
 def is_indexing(domain: str) -> bool:
     with _lock:
         return normalize_domain(domain) in _in_progress
+
+
+def _set_progress(domain: str, **fields) -> None:
+    with _lock:
+        snap = _progress.setdefault(
+            domain,
+            {
+                "phase": "crawling",
+                "pages_done": 0,
+                "pages_known": 0,
+                "chunks": 0,
+                "last_url": "",
+            },
+        )
+        snap.update(fields)
+
+
+def get_progress(domain: str) -> dict:
+    """Return a copy of the latest progress snapshot for a domain.
+
+    Falls back to a "ready"/"idle" snapshot when nothing is tracked yet, using
+    the vector store to tell whether content already exists.
+    """
+    domain = normalize_domain(domain)
+    with _lock:
+        snap = _progress.get(domain)
+        if snap is not None:
+            out = dict(snap)
+            out["indexing"] = domain in _in_progress
+            return out
+    # No active/finished crawl recorded this process lifetime.
+    indexed = vectorstore.is_indexed(domain)
+    return {
+        "phase": "ready" if indexed else "idle",
+        "pages_done": 0,
+        "pages_known": 0,
+        "chunks": 0,
+        "last_url": "",
+        "indexing": False,
+    }
 
 
 def _mark_start(domain: str) -> bool:
@@ -42,12 +87,29 @@ def reindex(domain: str) -> int:
     if not _mark_start(domain):
         logger.info("Crawl already in progress for %s", domain)
         return -1
+
+    # Reset the snapshot for this run.
+    _set_progress(
+        domain,
+        phase="crawling",
+        pages_done=0,
+        pages_known=0,
+        chunks=0,
+        last_url="",
+    )
+
+    def _on_progress(done: int, known: int, last_url: str) -> None:
+        _set_progress(
+            domain, pages_done=done, pages_known=known, last_url=last_url
+        )
+
     try:
         pages = crawl_domain(
             domain,
             max_pages=_settings.crawl_max_pages,
             timeout=_settings.crawl_timeout,
             respect_robots=_settings.crawl_respect_robots,
+            progress_cb=_on_progress,
         )
         records = [{"url": p.url, "title": p.title, "text": p.text} for p in pages]
 
@@ -58,10 +120,14 @@ def reindex(domain: str) -> int:
                 overlap=_settings.chunk_overlap,
             )
 
+        # Crawl finished; now embedding/storing.
+        _set_progress(domain, phase="embedding", pages_done=len(pages))
         count = vectorstore.index_documents(domain, records, chunk_fn=_chunk)
+        _set_progress(domain, phase="ready", chunks=count)
         return count
     except Exception:
         logger.exception("Indexing failed for %s", domain)
+        _set_progress(domain, phase="error")
         return 0
     finally:
         _mark_done(domain)

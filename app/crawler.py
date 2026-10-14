@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable, Optional
 from urllib.parse import urljoin, urlparse, urldefrag
 from urllib.robotparser import RobotFileParser
 
@@ -35,8 +36,13 @@ USER_AGENT = (
 # Tags whose text we never want in the knowledge base.
 _STRIP_TAGS = ["script", "style", "noscript", "template", "svg"]
 
-# After the DOM is ready, give client-side frameworks a moment to render.
-_RENDER_WAIT_MS = 3500
+# After the DOM is ready, wait for the network to go idle (JS frameworks
+# finishing their fetches) but never block longer than this cap. This replaces
+# a flat multi-second sleep on every page, which dominated crawl time.
+_NETWORKIDLE_CAP_MS = 1500
+# If a page already yielded this much visible text at domcontentloaded, it's a
+# server-rendered/static page and needs no extra wait for client rendering.
+_ENOUGH_TEXT_CHARS = 600
 
 # File extensions we skip (binary / non-HTML).
 _SKIP_EXT = (
@@ -60,6 +66,12 @@ class Page:
     url: str
     title: str
     text: str
+
+
+# Called after each page is processed, with (pages_done, pages_known, last_url).
+# ``pages_known`` is the current size of the crawl frontier (seen + queued),
+# which is an upper bound that grows as new links are discovered.
+ProgressCallback = Callable[[int, int, str], None]
 
 
 @dataclass
@@ -165,11 +177,15 @@ def crawl_domain(
     max_pages: int,
     timeout: int,
     respect_robots: bool,
+    progress_cb: Optional[ProgressCallback] = None,
 ) -> list[Page]:
     """Breadth-first crawl of a single origin using a headless browser.
 
     Must be called from a worker thread (not inside the asyncio event loop),
     which is how the indexer invokes it.
+
+    ``progress_cb``, if given, is invoked after each page is visited with
+    ``(pages_done, pages_known, last_url)`` so callers can report progress.
     """
     target = parse_target(domain)
     if not target.host:
@@ -208,6 +224,7 @@ def crawl_domain(
             queue: deque[str] = deque([start_url])
             pages: list[Page] = []
 
+            visited = 0
             while queue and len(pages) < max_pages:
                 url = queue.popleft()
                 url, _ = urldefrag(url)
@@ -225,8 +242,7 @@ def crawl_domain(
                     resp = page.goto(
                         url, wait_until="domcontentloaded", timeout=goto_timeout_ms
                     )
-                    page.wait_for_timeout(_RENDER_WAIT_MS)
-                    html = page.content()
+                    html = _wait_for_content(page)
                 except PWTimeout:
                     logger.warning("Timeout loading %s", url)
                     continue
@@ -249,6 +265,20 @@ def crawl_domain(
                     ):
                         if nxt not in seen:
                             queue.append(nxt)
+
+                visited += 1
+                # Upper bound on how many pages this crawl may touch: everything
+                # seen so far plus whatever is still queued, capped at max_pages.
+                known = min(len(seen) + len(queue), max_pages)
+                logger.info(
+                    "[crawl %s] %d/%d visited (%d kept) - %s",
+                    root_authority, visited, known, len(pages), url,
+                )
+                if progress_cb is not None:
+                    try:
+                        progress_cb(visited, known, url)
+                    except Exception:  # progress is best-effort, never fatal
+                        logger.debug("progress_cb raised", exc_info=True)
         finally:
             context.close()
             browser.close()
@@ -275,6 +305,35 @@ def _first_reachable(page, seeds: list[str], timeout_ms: int) -> str | None:
         if resp is None or resp.status < 400:
             return page.url  # follow any redirect to the final URL
     return None
+
+
+def _wait_for_content(page) -> str:
+    """Return page HTML after a short, adaptive wait for client rendering.
+
+    Static / server-rendered pages already have their text at
+    ``domcontentloaded``, so we return immediately. For pages that look empty
+    (likely a JS app still rendering), we wait for the network to go idle, but
+    never longer than ``_NETWORKIDLE_CAP_MS``. This avoids the old flat
+    multi-second sleep that was paid on every single page.
+    """
+    html = page.content()
+    if _has_enough_text(html):
+        return html
+    try:
+        page.wait_for_load_state("networkidle", timeout=_NETWORKIDLE_CAP_MS)
+    except PWTimeout:
+        pass  # cap reached; take whatever rendered so far
+    except Exception:
+        pass
+    return page.content()
+
+
+def _has_enough_text(html: str) -> bool:
+    """Cheap check: does the rendered HTML already carry substantial text?"""
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(_STRIP_TAGS):
+        tag.decompose()
+    return len(soup.get_text(strip=True)) >= _ENOUGH_TEXT_CHARS
 
 
 def _reset_page(page) -> None:

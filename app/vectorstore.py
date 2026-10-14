@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
+
+# Disable ChromaDB's PostHog telemetry *before* importing chromadb. Otherwise an
+# incompatible posthog version spams "capture() takes 1 positional argument but
+# 3 were given" errors on every collection op. Must be set prior to import.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
