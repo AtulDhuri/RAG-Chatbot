@@ -10,6 +10,10 @@ chromadb==0.5.23
 # positional argument" errors. Pin to a compatible release.
 posthog==3.7.0
 openai==1.59.6
+context.dev==2.25.0
+# ---- Postgres / pgvector vector store (Supabase) ----
+psycopg[binary]==3.2.3
+pgvector==0.3.6
 pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1

@@ -6,16 +6,19 @@ services:
     dockerfilePath: ./Dockerfile
     # The container listens on $PORT, which Render injects automatically.
     envVars:
-      # Set the actual value in the Render dashboard (kept secret, never in git).
+      # Set the actual values in the Render dashboard (kept secret, never in git).
       - key: OPENAI_API_KEY
         sync: false
-    # NOTE: Persistent disks are a PAID Render feature and are not available on
-    # the free plan. On free, the ChromaDB index is ephemeral: it is rebuilt by
-    # crawling on demand and is wiped on each deploy / instance restart. The app
-    # handles this gracefully (it re-crawls when content is missing).
-    #
-    # To keep the index across deploys, upgrade the plan and uncomment:
-    # disk:
-    #   name: chroma-data
-    #   mountPath: /app/data
-    #   sizeGB: 1
+      - key: CONTEXT_DEV_API_KEY
+        sync: false
+      # ---- Vector store (Supabase Postgres + pgvector) ----
+      # Durable, multi-tenant storage for chunks + embeddings. Because the index
+      # lives in Supabase (not on the container disk), it survives deploys and
+      # restarts and is safe across multiple replicas - no persistent disk needed.
+      - key: VECTOR_BACKEND
+        value: pgvector
+      # Supabase connection string. Use the connection pooler URL (port 6543).
+      - key: DATABASE_URL
+        sync: false
+      - key: EMBEDDING_DIM
+        value: "1536"

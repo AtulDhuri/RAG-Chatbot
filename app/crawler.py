@@ -9,6 +9,10 @@ Both http:// and https:// are supported, including explicit ports (so local
 dev servers like http://localhost:3000 work). If the user supplies a bare
 domain with no scheme, the crawler tries https first and falls back to http.
 
+``crawl_domain`` dispatches between the hosted Context.dev crawler (preferred
+when an API key is set) and this local Playwright crawler, controlled by the
+``CRAWL_BACKEND`` setting. See ``app/context_dev.py`` for the hosted backend.
+
 Public surface:
     normalize_domain(raw) -> str          # stable tenant key (host[:port])
     Page(url, title, text)
@@ -179,10 +183,75 @@ def crawl_domain(
     respect_robots: bool,
     progress_cb: Optional[ProgressCallback] = None,
 ) -> list[Page]:
-    """Breadth-first crawl of a single origin using a headless browser.
+    """Crawl a single origin and return its pages.
+
+    Dispatches to a crawl backend based on ``settings.crawl_backend``:
+
+    - ``"context_dev"``: use the hosted Context.dev crawler (no local browser).
+    - ``"playwright"``:   use the local headless-Chromium crawler below.
+    - ``"auto"`` (default): prefer Context.dev when an API key is configured,
+      and fall back to Playwright if the hosted crawl errors or yields nothing.
 
     Must be called from a worker thread (not inside the asyncio event loop),
-    which is how the indexer invokes it.
+    which is how the indexer invokes it. ``progress_cb``, if given, is invoked
+    with ``(pages_done, pages_known, last_url)`` so callers can report progress.
+    """
+    from .config import get_settings
+    from . import context_dev
+
+    backend = (get_settings().crawl_backend or "auto").lower()
+    use_context_dev = backend == "context_dev" or (
+        backend == "auto" and context_dev.is_available()
+    )
+
+    if use_context_dev:
+        try:
+            pages = context_dev.crawl_site(
+                domain,
+                max_pages=max_pages,
+                use_main_content_only=True,
+                progress_cb=progress_cb,
+            )
+            if pages:
+                # Adapt the wrapper's Page dataclass to this module's Page.
+                return [Page(url=p.url, title=p.title, text=p.text) for p in pages]
+            logger.warning(
+                "Context.dev crawl of %s returned no pages; "
+                "falling back to Playwright." if backend == "auto"
+                else "Context.dev crawl of %s returned no pages.",
+                domain,
+            )
+            if backend == "context_dev":
+                return []
+        except context_dev.ContextDevError as exc:
+            if backend == "context_dev":
+                logger.error("Context.dev crawl failed for %s: %s", domain, exc)
+                return []
+            logger.warning(
+                "Context.dev crawl failed for %s (%s); falling back to Playwright.",
+                domain, exc,
+            )
+
+    return _crawl_domain_playwright(
+        domain,
+        max_pages=max_pages,
+        timeout=timeout,
+        respect_robots=respect_robots,
+        progress_cb=progress_cb,
+    )
+
+
+def _crawl_domain_playwright(
+    domain: str,
+    *,
+    max_pages: int,
+    timeout: int,
+    respect_robots: bool,
+    progress_cb: Optional[ProgressCallback] = None,
+) -> list[Page]:
+    """Breadth-first crawl of a single origin using a headless browser.
+
+    This is the local fallback backend; see ``crawl_domain`` for dispatch.
 
     ``progress_cb``, if given, is invoked after each page is visited with
     ``(pages_done, pages_known, last_url)`` so callers can report progress.
