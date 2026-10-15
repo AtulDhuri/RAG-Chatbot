@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local Widget Test</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 720px;
+        margin: 48px auto;
+        padding: 0 16px;
+        color: #1f2937;
+        line-height: 1.6;
+      }
+      code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }
+      .note { background: #fff7ed; border: 1px solid #fed7aa; padding: 12px 16px; border-radius: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>Local widget test page</h1>
+    <p>
+      This page loads the chatbot widget from your deployed Render backend and
+      points it at a real site to answer questions about.
+    </p>
+
+    <div class="note">
+      <strong>How it works locally:</strong> when a page is opened from your
+      computer the browser's domain is <code>localhost</code> / a file path,
+      which is not a real site to crawl. The <code>data-domain</code> attribute
+      below overrides that and tells the widget which real site to answer about.
+      Change it to whatever site you want to test. Remove the attribute entirely
+      when you embed on the actual website.
+    </div>
+
+    <p>Click the chat bubble in the bottom-right corner to start.</p>
+
+    <!--
+      The embed. Points at the deployed backend. data-domain is the LOCAL
+      TESTING override (set it to the real site you want to chat with).
+    -->
+    <script
+      src="https://rag-chatbot-00gu.onrender.com/widget.js"
+      data-title="Ask about this site"
+      data-accent="#2563eb"
+      data-domain="https://drkrinitamotwani.com/"
+      defer
+    ></script>
+  </body>
+</html>
