@@ -266,7 +266,7 @@
         function read() {
           return reader.read().then(function (part) {
             buffer += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
-            var lines = buffer.split("\\n");
+            var lines = buffer.split("\n");
             buffer = lines.pop() || "";
             lines.forEach(function (line) {
               if (line.indexOf("data: ") !== 0) return;

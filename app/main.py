@@ -472,7 +472,7 @@ def chat_stream(request: Request, req: ChatRequest):
     if faq:
         payload = {"type": "complete", "answer": faq["answer"], "sources": faq["sources"]}
         return StreamingResponse(
-            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -482,7 +482,7 @@ def chat_stream(request: Request, req: ChatRequest):
     if cached:
         payload = {"type": "complete", "answer": cached["answer"], "sources": cached.get("sources", [])}
         return StreamingResponse(
-            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -496,7 +496,7 @@ def chat_stream(request: Request, req: ChatRequest):
             "status": "indexing",
         }
         return StreamingResponse(
-            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -509,7 +509,7 @@ def chat_stream(request: Request, req: ChatRequest):
         for event in rag.stream_answer(domain, req.message, language=req.language):
             if event["type"] == "complete":
                 final = event
-            yield f"data: {json.dumps(event)}\\n\\n"
+            yield f"data: {json.dumps(event)}\n\n"
         if final:
             cache.set(cache_key, {"answer": final["answer"], "sources": final["sources"]})
 
