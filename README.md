@@ -108,3 +108,42 @@ The production flow uses Postgres when `DATABASE_URL` is configured. Create an a
 Put the returned `installation_token` in the widget script as `data-installation-token`. The server resolves the website from the hashed token and never trusts a browser-supplied domain as authorization. Chat usage is reserved atomically per website and billing period. The seeded Starter plan allows 500 chats. An inactive subscription returns the exact message `Subscription ended, Please connect {domain}`. Razorpay subscriptions and signed, replay-safe subscription webhooks are enabled when the Razorpay settings are present.
 
 Without `DATABASE_URL`, local development keeps the original domain-only demo flow and uses process-local auth/subscription state. That fallback is not durable or safe for multiple replicas; use Supabase/Postgres for production.
+
+## Production deployment
+
+Run the ordered database migrations before starting the API:
+
+```powershell
+$env:DATABASE_URL="postgresql://..."
+python -m app.migrations
+```
+
+Set `VECTOR_BACKEND=pgvector` (or `auto` with `DATABASE_URL`) and `EMBEDDING_DIM` to match the configured embedding model. The pgvector adapter stages a new version and switches the active version only after all chunks and embeddings are inserted, so a failed re-index keeps the previous knowledge base available.
+
+Configure Redis for shared cache, distributed rate limits, unauthorized-source blocking, and durable crawl jobs:
+
+```text
+REDIS_URL=redis://...
+CACHE_TTL_SECONDS=86400
+UNAUTHORIZED_THRESHOLD=50
+UNAUTHORIZED_WINDOW_SECONDS=900
+UNAUTHORIZED_BLOCK_SECONDS=3600
+RATE_LIMIT_PER_MINUTE=60
+```
+
+Run the API and a worker as separate processes in production:
+
+```powershell
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+python worker.py
+```
+
+When Redis is configured, crawl requests are deduplicated into the `rag:jobs:crawl` queue and the worker performs crawling, chunking, embedding, and version activation. Without Redis, local development uses the existing in-process thread fallback.
+
+The project regression tests are under `tests/` and run with:
+
+```powershell
+python -m pytest -q
+```
+
+Do not commit `.env`. Rotate provider, database, billing, webhook, and administrator credentials if they have been exposed outside the deployment secret manager.

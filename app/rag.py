@@ -46,8 +46,8 @@ def _chat(messages: list[dict]) -> str:
     return resp.choices[0].message.content or ""
 
 
-def answer(domain: str, question: str) -> dict:
-    """Return {"answer", "sources"} for a domain-scoped question."""
+def answer(domain: str, question: str, *, language: str = "auto") -> dict:
+    """Return a domain-scoped answer grounded in retrieved content."""
     hits = vectorstore.query(domain, question, top_k=_settings.retrieval_top_k)
 
     if not hits:
@@ -62,8 +62,8 @@ def answer(domain: str, question: str) -> dict:
     context = _build_context(hits)
     user_prompt = (
         f"Context passages from the website:\n\n{context}\n\n"
-        f"Visitor question: {question}"
-    )
+        f"Visitor question: {question}\n"
+        f"Answer in the requested language when it is not 'auto': {language}"    )
 
     reply = _chat(
         [

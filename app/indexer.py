@@ -7,7 +7,7 @@ import threading
 from .config import get_settings
 from .crawler import crawl_domain, normalize_domain
 from .chunking import chunk_text
-from . import vectorstore
+from . import cache, jobs, vectorstore
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
@@ -23,8 +23,10 @@ _progress: dict[str, dict] = {}
 
 
 def is_indexing(domain: str) -> bool:
+    domain = normalize_domain(domain)
     with _lock:
-        return normalize_domain(domain) in _in_progress
+        local = domain in _in_progress
+    return local or jobs.is_queued(domain)
 
 
 def _set_progress(domain: str, **fields) -> None:
@@ -53,7 +55,7 @@ def get_progress(domain: str) -> dict:
         snap = _progress.get(domain)
         if snap is not None:
             out = dict(snap)
-            out["indexing"] = domain in _in_progress
+            out["indexing"] = is_indexing(domain)
             return out
     # No active/finished crawl recorded this process lifetime.
     indexed = vectorstore.is_indexed(domain)
@@ -123,6 +125,7 @@ def reindex(domain: str) -> int:
         # Crawl finished; now embedding/storing.
         _set_progress(domain, phase="embedding", pages_done=len(pages))
         count = vectorstore.index_documents(domain, records, chunk_fn=_chunk)
+        cache.invalidate_domain(domain)
         _set_progress(domain, phase="ready", chunks=count)
         return count
     except Exception:
@@ -147,8 +150,12 @@ def ensure_indexed(domain: str, *, force: bool = False) -> str:
     if is_indexing(domain):
         return "indexing"
 
-    # Fire-and-forget background crawl.
-    threading.Thread(target=reindex, args=(domain,), daemon=True).start()
+    # Redis-backed deployments use the durable worker queue. Local development
+    # keeps the lightweight thread fallback when Redis is unavailable.
+    if _settings.redis_url and jobs.enqueue_reindex(domain, force=force):
+        _set_progress(domain, phase="crawling")
+    else:
+        threading.Thread(target=reindex, args=(domain,), daemon=True).start()
 
     # If we already have (stale) content, answers can still be served meanwhile.
     return "ready" if vectorstore.is_indexed(domain) else "started"

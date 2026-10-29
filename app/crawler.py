@@ -16,6 +16,8 @@ Public surface:
 """
 from __future__ import annotations
 
+import ipaddress
+import socket
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -58,6 +60,16 @@ def _is_ip(host: str) -> bool:
         ipaddress.ip_address(host)
         return True
     except ValueError:
+        return False
+
+
+def _is_private_target(host: str) -> bool:
+    if host in {"localhost", "localhost.localdomain"}:
+        return False
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, None)}
+        return any(ipaddress.ip_address(address).is_private or ipaddress.ip_address(address).is_loopback or ipaddress.ip_address(address).is_link_local for address in addresses)
+    except (OSError, ValueError):
         return False
 
 
@@ -191,13 +203,15 @@ def crawl_domain(
     if not target.host:
         logger.warning("Could not parse a host from %r", domain)
         return []
+    if _is_private_target(target.host):
+        raise ValueError("Crawling private or local network targets is not allowed")
 
     seeds = target.seed_urls()
     goto_timeout_ms = max(timeout, 15) * 1000
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=USER_AGENT, ignore_https_errors=True)
+        context = browser.new_context(user_agent=USER_AGENT, ignore_https_errors=False)
         page = context.new_page()
         # Don't download heavy media; we only need text + links.
         page.route(

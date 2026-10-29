@@ -27,6 +27,18 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 5
     chunk_size: int = 800
     chunk_overlap: int = 150
+    crawl_max_pages: int = 100
+    crawl_timeout: int = 30
+    crawl_respect_robots: bool = True
+    crawl_ttl_seconds: int = 86400
+
+    # ---- Response cache / distributed controls ----
+    redis_url: str = ""
+    cache_ttl_seconds: int = 86400
+    unauthorized_threshold: int = 50
+    unauthorized_window_seconds: int = 900
+    unauthorized_block_seconds: int = 3600
+    rate_limit_per_minute: int = 60
 
     # ---- Subscription / authentication ----
     session_ttl_seconds: int = 2592000
@@ -43,9 +55,12 @@ class Settings(BaseSettings):
 
     @property
     def origins_list(self) -> list[str]:
-        if self.allowed_origins.strip() == "*":
+        configured = self.allowed_origins.strip()
+        if configured == "*":
+            if self.public_app_url.startswith("https://"):
+                raise ValueError("ALLOWED_ORIGINS must be explicit when PUBLIC_APP_URL uses HTTPS")
             return ["*"]
-        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        return [o.strip() for o in configured.split(",") if o.strip()]
 
 
 @lru_cache

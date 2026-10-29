@@ -20,6 +20,7 @@ from fastapi import HTTPException, Request
 
 from .config import get_settings
 from .crawler import normalize_domain
+from . import security
 
 _settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -32,8 +33,11 @@ CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, name TEXT NOT NULL, chat_
 CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, plan_id TEXT NOT NULL REFERENCES plans(id), status TEXT NOT NULL, start_date TIMESTAMPTZ, end_date TIMESTAMPTZ, current_period_start TIMESTAMPTZ, current_period_end TIMESTAMPTZ, razorpay_customer_id TEXT UNIQUE, razorpay_subscription_id TEXT UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS websites (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, domain TEXT NOT NULL UNIQUE, installation_token_hash TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS chat_queries (id BIGSERIAL PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, domain TEXT NOT NULL, question TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS chat_queries (id BIGSERIAL PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, domain TEXT NOT NULL, question TEXT NOT NULL, normalized_question TEXT NOT NULL DEFAULT '', language TEXT NOT NULL DEFAULT 'auto', cache_hit BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS chat_queries_account_created_idx ON chat_queries(account_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS usage (website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, period TEXT NOT NULL, chat_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (website_id, period));
+CREATE TABLE IF NOT EXISTS cached_answers (cache_key TEXT PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, domain TEXT NOT NULL, normalized_question TEXT NOT NULL, language TEXT NOT NULL DEFAULT 'auto', answer TEXT NOT NULL, sources JSONB NOT NULL DEFAULT '[]', confidence REAL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_accessed_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS faqs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, question TEXT NOT NULL, answer TEXT NOT NULL, pinned BOOLEAN NOT NULL DEFAULT FALSE, locked BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE(website_id, question));
 CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, received_at TIMESTAMPTZ NOT NULL DEFAULT now());
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'customer';
 ALTER TABLE plans ADD COLUMN IF NOT EXISTS indexed_page_limit INTEGER NOT NULL DEFAULT 100;
@@ -47,6 +51,9 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
 ALTER TABLE websites ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS normalized_question TEXT NOT NULL DEFAULT '';
+ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS cache_hit BOOLEAN NOT NULL DEFAULT FALSE;
 INSERT INTO plans(id, name, chat_limit) VALUES ('starter', 'Starter', 500) ON CONFLICT (id) DO NOTHING;
 """
 
@@ -118,7 +125,8 @@ def signup(email: str, password: str, *, role: str = "customer", admin_code: str
             if email in _memory["accounts"]:
                 raise HTTPException(409, "Email already registered")
             account_id = secrets.token_hex(16)
-            _memory["accounts"][email] = {"id": account_id, "password": _hash_password(password), "role": role, "subscription": {"status": "active", "limit": _settings.starter_chat_limit}}
+            trial_end = time.time() + 30 * 86400
+            _memory["accounts"][email] = {"id": account_id, "password": _hash_password(password), "role": role, "subscription": {"status": "trialing", "limit": _settings.starter_chat_limit, "end": trial_end}}
     return {"account_id": account_id, "email": email}
 
 def login(email: str, password: str) -> str:
@@ -178,6 +186,12 @@ def create_site(account_id: str, domain: str) -> dict:
     installation_token = secrets.token_urlsafe(32)
     if using_db():
         with _conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(p.website_limit, 1) FROM subscriptions s JOIN plans p ON p.id=s.plan_id WHERE s.account_id=%s ORDER BY s.updated_at DESC LIMIT 1", (account_id,))
+            plan_row = cur.fetchone()
+            if plan_row:
+                cur.execute("SELECT COUNT(*) FROM websites WHERE account_id=%s AND active", (account_id,))
+                if int(cur.fetchone()[0]) >= int(plan_row[0]):
+                    raise HTTPException(403, "Your plan's website limit has been reached")
             cur.execute("SELECT id,account_id FROM websites WHERE domain=%s", (domain,))
             existing = cur.fetchone()
             if existing:
@@ -218,16 +232,17 @@ def site_from_token(token: str, domain: str) -> tuple[str, str]:
     return site["id"], site["account_id"]
 
 def require_site(request: Request, domain: str) -> tuple[str, str]:
-    """Resolve a registered website only from its installation token.
-
-    Domain-only requests are rejected in every environment so old widget embeds
-    cannot crawl or chat. The token hash and normalized domain must match the
-    same website row.
-    """
+    """Resolve a registered website only from its installation token."""
+    security.reject_if_blocked(request, domain)
     token = request.headers.get("X-Installation-Token") or request.query_params.get("token")
     if not token:
+        security.record_unauthorized(request, domain)
         raise HTTPException(401, "Installation token required")
-    return site_from_token(token, domain)
+    try:
+        return site_from_token(token, domain)
+    except HTTPException:
+        security.record_unauthorized(request, domain)
+        raise
 
 def require_active_subscription(account_id: str, domain: str) -> None:
     """Fail closed for production requests without an active subscription."""
@@ -236,7 +251,8 @@ def require_active_subscription(account_id: str, domain: str) -> None:
     if not using_db():
         with _lock:
             account = next((a for a in _memory["accounts"].values() if a["id"] == account_id), None)
-            if not account or not _active(account["subscription"]["status"], None):
+            subscription = account.get("subscription", {})
+            if not account or subscription.get("status") not in {"active", "trialing"} or subscription.get("end", 0) <= time.time():
                 raise HTTPException(403, f"Subscription ended, Please connect {domain}")
         return
     with _conn() as conn, conn.cursor() as cur:
@@ -258,7 +274,8 @@ def enforce_chat_quota(site_id: str, account_id: str, domain: str) -> None:
         with _lock:
             key = (site_id, _period()); count = _memory["usage"].get(key, 0)
             account = next((a for a in _memory["accounts"].values() if a["id"] == account_id), None)
-            if not account or not _active(account["subscription"]["status"], None): raise HTTPException(402, "Subscription required")
+            subscription = account.get("subscription", {}) if account else {}
+            if not account or subscription.get("status") not in {"active", "trialing"} or subscription.get("end", 0) <= time.time(): raise HTTPException(402, "Subscription required")
             if count >= account["subscription"]["limit"]: raise HTTPException(429, "Chat quota exceeded")
             _memory["usage"][key] = count + 1
         return
@@ -371,14 +388,15 @@ def rotate_site_token(account_id: str, domain: str) -> dict:
         return {"domain": domain, "site_id": site["id"], "installation_token": raw}
 
 
-def record_chat_query(site_id: str, account_id: str, domain: str, question: str) -> None:
+def record_chat_query(site_id: str, account_id: str, domain: str, question: str, *, cache_hit: bool = False) -> None:
     if account_id == "local":
         return
     if using_db():
+        from .cache import normalize_question
         with _conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO chat_queries(account_id,website_id,domain,question) VALUES (%s,%s,%s,%s)",
-                (account_id, site_id, normalize_domain(domain), question[:2000]),
+                "INSERT INTO chat_queries(account_id,website_id,domain,question,normalized_question,cache_hit) VALUES (%s,%s,%s,%s,%s,%s)",
+                (account_id, site_id, normalize_domain(domain), question[:2000], normalize_question(question), cache_hit),
             )
 
 
@@ -418,3 +436,49 @@ def usage_summary(account_id: str) -> dict:
         "period_end": subscription[3],
         "queries": queries,
     }
+
+
+def require_owned_site(account_id: str, domain: str) -> tuple[str, str]:
+    """Resolve a site for dashboard operations using the authenticated account."""
+    domain = normalize_domain(domain)
+    if using_db():
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id, account_id FROM websites WHERE account_id=%s AND domain=%s AND active", (account_id, domain))
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Website not found")
+        return str(row[0]), str(row[1])
+    with _lock:
+        site = _memory["sites"].get(domain)
+        if not site or site["account_id"] != account_id:
+            raise HTTPException(404, "Website not found")
+        return site["id"], site["account_id"]
+
+
+def faq_for_question(account_id: str, site_id: str, question: str) -> dict | None:
+    if not using_db():
+        return None
+    from .cache import normalize_question
+    normalized = normalize_question(question)
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT question, answer FROM faqs WHERE account_id=%s AND website_id=%s AND lower(regexp_replace(question, '[^a-zA-Z0-9 ]', '', 'g'))=lower(regexp_replace(%s, '[^a-zA-Z0-9 ]', '', 'g')) ORDER BY pinned DESC, updated_at DESC LIMIT 1", (account_id, site_id, normalized))
+        row = cur.fetchone()
+    return {"question": row[0], "answer": row[1], "sources": []} if row else None
+
+
+def promote_faq(account_id: str, site_id: str, question: str, answer: str, *, pinned: bool = False, locked: bool = False) -> None:
+    if not using_db():
+        raise HTTPException(503, "FAQ management requires PostgreSQL")
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO faqs(account_id,website_id,question,answer,pinned,locked) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (website_id,question) DO UPDATE SET answer=EXCLUDED.answer,pinned=EXCLUDED.pinned,locked=EXCLUDED.locked,updated_at=now()", (account_id, site_id, question[:2000], answer[:10000], pinned, locked))
+
+
+def analytics_summary(account_id: str) -> dict:
+    if not using_db():
+        return {"conversations": 0, "cache_hits": 0, "cache_hit_rate": 0, "top_questions": []}
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*), COALESCE(SUM(cache_hit::int),0) FROM chat_queries WHERE account_id=%s", (account_id,))
+        conversations, cache_hits = cur.fetchone()
+        cur.execute("SELECT question, COUNT(*) AS frequency, MAX(created_at) FROM chat_queries WHERE account_id=%s GROUP BY question ORDER BY frequency DESC, MAX(created_at) DESC LIMIT 25", (account_id,))
+        top = [{"question": row[0], "frequency": row[1], "last_asked": row[2]} for row in cur.fetchall()]
+    return {"conversations": int(conversations), "cache_hits": int(cache_hits), "cache_hit_rate": round((cache_hits / conversations) if conversations else 0, 4), "top_questions": top}

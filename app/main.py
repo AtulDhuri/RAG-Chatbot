@@ -13,13 +13,13 @@ from slowapi.util import get_remote_address
 
 from .config import get_settings
 from .crawler import normalize_domain
-from . import indexer, rag, vectorstore, subscriptions
+from . import cache, indexer, rag, security, vectorstore, subscriptions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url or "memory://")
 
 app = FastAPI(title="RAG Website Chatbot", version="1.0.0")
 app.state.limiter = limiter
@@ -70,12 +70,14 @@ class StatusResponse(BaseModel):
 class ChatRequest(BaseModel):
     domain: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1, max_length=2000)
+    language: str = Field(default="auto", min_length=2, max_length=12)
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[str]
     status: str  # "ready" | "indexing"
+    cache_hit: bool = False
 
 
 class SignupRequest(BaseModel):
@@ -98,6 +100,13 @@ class SiteResponse(BaseModel):
     domain: str
     site_id: str
     installation_token: str
+
+
+class FAQRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    answer: str = Field(..., min_length=1, max_length=10000)
+    pinned: bool = False
+    locked: bool = False
 
 
 class RazorpayVerifyRequest(BaseModel):
@@ -126,6 +135,11 @@ def plans():
 @app.get("/api/usage")
 def usage(request: Request):
     return subscriptions.usage_summary(subscriptions.account_for_request(request))
+
+
+@app.get("/api/analytics")
+def analytics(request: Request):
+    return subscriptions.analytics_summary(subscriptions.account_for_request(request))
 
 
 @app.get("/api/admin/me")
@@ -309,6 +323,31 @@ def rotate_site_token(request: Request, domain: str):
     return subscriptions.rotate_site_token(account_id, domain)
 
 
+@app.post("/api/sites/{domain:path}/recrawl")
+def recrawl_site(request: Request, domain: str):
+    account_id = subscriptions.account_for_request(request)
+    subscriptions.require_active_subscription(account_id, domain)
+    subscriptions.require_owned_site(account_id, domain)
+    normalized = normalize_domain(domain)
+    status = indexer.ensure_indexed(normalized, force=True)
+    return {"domain": normalized, "status": status}
+
+
+@app.get("/api/sites/{domain:path}/crawl-status")
+def crawl_status(request: Request, domain: str):
+    account_id = subscriptions.account_for_request(request)
+    subscriptions.require_owned_site(account_id, domain)
+    return indexer.get_progress(normalize_domain(domain))
+
+
+@app.post("/api/sites/{domain:path}/faqs")
+def save_faq(request: Request, domain: str, req: FAQRequest):
+    account_id = subscriptions.account_for_request(request)
+    site_id, _ = subscriptions.require_owned_site(account_id, domain)
+    subscriptions.promote_faq(account_id, site_id, req.question, req.answer, pinned=req.pinned, locked=req.locked)
+    return {"saved": True}
+
+
 @app.post("/api/register", response_model=RegisterResponse)
 def register(request: Request, req: RegisterRequest):
     domain = normalize_domain(req.domain)
@@ -344,30 +383,37 @@ def status(request: Request, domain: str, token: str | None = None):
 @limiter.limit(settings.chat_rate_limit)
 def chat(request: Request, req: ChatRequest):
     domain = normalize_domain(req.domain)
+    security.enforce_distributed_rate_limit(request, domain)
     site_id, account_id = subscriptions.require_site(request, domain)
+    security.enforce_distributed_rate_limit(request, domain, tenant_id=account_id, website_id=site_id)
     subscriptions.require_active_subscription(account_id, domain)
+
+    faq = subscriptions.faq_for_question(account_id, site_id, req.message)
+    if faq:
+        subscriptions.record_chat_query(site_id, account_id, domain, req.message, cache_hit=True)
+        return ChatResponse(answer=faq["answer"], sources=faq["sources"], status="ready", cache_hit=True)
+
+    cache_key = cache.key(account_id, site_id, domain, req.language, req.message)
+    cached = cache.get(cache_key)
+    if cached:
+        subscriptions.record_chat_query(site_id, account_id, domain, req.message, cache_hit=True)
+        return ChatResponse(answer=cached["answer"], sources=cached.get("sources", []), status="ready", cache_hit=True)
 
     # Make sure content exists / is fresh; kicks off a background crawl if not.
     indexer.ensure_indexed(domain)
-
     if not vectorstore.is_indexed(domain):
         return ChatResponse(
-            answer=(
-                "I'm still reading through this website to learn about it. "
-                "Please ask again in a minute or two."
-            ),
-            sources=[],
-            status="indexing",
+            answer="I'm still reading through this website to learn about it. Please ask again in a minute or two.",
+            sources=[], status="indexing",
         )
 
     # Reserve one quota unit only for a request that will call the RAG/LLM path.
     subscriptions.enforce_chat_quota(site_id, account_id, domain)
     subscriptions.record_chat_query(site_id, account_id, domain, req.message)
-    result = rag.answer(domain, req.message)
+    result = rag.answer(domain, req.message, language=req.language)
+    cache.set(cache_key, {"answer": result["answer"], "sources": result["sources"]})
     status = "indexing" if indexer.is_indexing(domain) else "ready"
-    return ChatResponse(
-        answer=result["answer"], sources=result["sources"], status=status
-    )
+    return ChatResponse(answer=result["answer"], sources=result["sources"], status=status, cache_hit=False)
 
 
 @app.get("/widget.js")
