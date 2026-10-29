@@ -118,7 +118,7 @@ class RazorpayVerifyRequest(BaseModel):
 class PlanRequest(BaseModel):
     id: str = Field(..., min_length=2, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
     name: str = Field(..., min_length=1, max_length=80)
-    price: Decimal = Field(..., ge=0, description="Price in normal currency units, for example 499 means ₹499")
+    price: Decimal = Field(..., gt=0, description="Price in normal currency units, for example 499 means ₹499")
     currency: str = Field(default="INR", min_length=3, max_length=3)
     billing_interval: str = Field(default="monthly", pattern=r"^(monthly|yearly)$")
     chat_limit: int = Field(..., gt=0)
@@ -163,6 +163,12 @@ def admin_create_plan(request: Request, req: PlanRequest):
             "interval": 1,
             "item": {"name": req.name, "amount": int(req.price * 100), "currency": req.currency.upper(), "description": req.name},
         })
+    except Exception as exc:
+        logger.exception("Razorpay plan creation failed: %s", exc)
+        message = str(exc).strip() or "Razorpay rejected the plan request"
+        raise HTTPException(502, f"Razorpay rejected the plan: {message[:300]}") from exc
+
+    try:
         return subscriptions.create_plan({
             "id": req.id, "name": req.name, "chat_limit": req.chat_limit,
             "website_limit": req.website_limit, "indexed_page_limit": req.indexed_page_limit,
@@ -172,8 +178,8 @@ def admin_create_plan(request: Request, req: PlanRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Admin plan creation failed")
-        raise HTTPException(502, "Unable to create Razorpay plan") from exc
+        logger.exception("Saving plan after Razorpay creation failed: %s", exc)
+        raise HTTPException(503, "Razorpay plan was created but could not be saved. Check Razorpay before retrying.") from exc
 
 
 @app.post("/api/billing/create-subscription")

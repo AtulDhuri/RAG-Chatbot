@@ -192,10 +192,16 @@
     if (statusTimer) clearTimeout(statusTimer);
 
     function tick() {
-      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN) + (INSTALLATION_TOKEN ? "&token=" + encodeURIComponent(INSTALLATION_TOKEN) : ""), {
+      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN), {
         headers: INSTALLATION_TOKEN ? { "X-Installation-Token": INSTALLATION_TOKEN } : {},
       })
-        .then(function (r) { return r.json(); })
+        .then(function (r) {
+          if (r.status === 401) {
+            setStatus("Installation token missing or invalid", "error");
+            return null;
+          }
+          return r.json();
+        })
         .then(function (s) {
           if (!s) return;
           if (s.phase === "ready" || s.indexed) {

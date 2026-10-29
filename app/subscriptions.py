@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import psycopg
 from fastapi import HTTPException, Request
@@ -231,15 +232,41 @@ def site_from_token(token: str, domain: str) -> tuple[str, str]:
         raise HTTPException(401, "Invalid installation token")
     return site["id"], site["account_id"]
 
+def _origin_matches_domain(request: Request, domain: str) -> bool:
+    origin = request.headers.get("Origin") or request.headers.get("Referer")
+    if not origin:
+        return True  # Non-browser clients do not send Origin; token still authenticates them.
+    parsed = urlparse(origin)
+    origin_domain = normalize_domain(parsed.netloc or parsed.path)
+    return origin_domain == normalize_domain(domain)
+
+
 def require_site(request: Request, domain: str) -> tuple[str, str]:
     """Resolve a registered website only from its installation token."""
-    security.reject_if_blocked(request, domain)
     token = request.headers.get("X-Installation-Token") or request.query_params.get("token")
     if not token:
+        security.reject_if_blocked(request, domain)
         security.record_unauthorized(request, domain)
         raise HTTPException(401, "Installation token required")
+
+    # A source may have been blocked while an old/missing token was installed.
+    # Validate a newly supplied token once so a legitimate customer can recover
+    # without waiting for the temporary block to expire.
+    if security.source_is_blocked(request, domain):
+        try:
+            result = site_from_token(token, domain)
+        except HTTPException:
+            raise HTTPException(401, "Unauthorized source")
+        if not _origin_matches_domain(request, domain):
+            raise HTTPException(403, "Request origin is not registered for this website")
+        security.clear_block(request, domain)
+        return result
+
     try:
-        return site_from_token(token, domain)
+        result = site_from_token(token, domain)
+        if not _origin_matches_domain(request, domain):
+            raise HTTPException(403, "Request origin is not registered for this website")
+        return result
     except HTTPException:
         security.record_unauthorized(request, domain)
         raise

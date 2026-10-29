@@ -93,3 +93,31 @@ def record_unauthorized(request: Request, domain: str) -> None:
         if len(failures) >= _settings.unauthorized_threshold:
             _blocks[source] = now + _settings.unauthorized_block_seconds
             failures.clear()
+
+
+def clear_block(request: Request, domain: str) -> None:
+    source = _source_key(request, domain)
+    if _redis is not None:
+        try:
+            _redis.delete(f"rag:block:{source}", f"rag:unauthorized:{source}")
+        except Exception:
+            pass
+        return
+    with _lock:
+        _blocks.pop(source, None)
+        _failures.pop(source, None)
+
+
+def source_is_blocked(request: Request, domain: str) -> bool:
+    source = _source_key(request, domain)
+    if _redis is not None:
+        try:
+            return bool(_redis.exists(f"rag:block:{source}"))
+        except Exception as exc:
+            raise HTTPException(503, "Distributed protection backend unavailable") from exc
+    with _lock:
+        until = _blocks.get(source, 0)
+        if until <= time.time():
+            _blocks.pop(source, None)
+            return False
+        return True
