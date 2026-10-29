@@ -18,3 +18,7 @@ tenacity==9.0.0
 razorpay==1.4.2
 # razorpay 1.4.2 imports the legacy pkg_resources module.
 setuptools<81
+context.dev==2.25.0
+# ---- Postgres / pgvector vector store and subscriptions ----
+psycopg[binary]==3.2.3
+pgvector==0.3.6
