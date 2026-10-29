@@ -152,6 +152,27 @@ def admin_me(request: Request):
     return {"admin": True}
 
 
+@app.get("/api/admin/sites")
+def admin_sites(request: Request):
+    account_id = subscriptions.account_for_request(request)
+    subscriptions.require_admin(account_id)
+    return subscriptions.admin_sites()
+
+
+@app.post("/api/admin/sites/{domain:path}/recrawl")
+def admin_recrawl_site(request: Request, domain: str):
+    account_id = subscriptions.account_for_request(request)
+    subscriptions.require_admin(account_id)
+    normalized = normalize_domain(domain)
+    site_account_id = subscriptions.admin_site_account(normalized)
+    status = indexer.ensure_indexed(
+        normalized,
+        force=True,
+        max_pages=subscriptions.indexed_page_limit(site_account_id),
+    )
+    return {"domain": normalized, "status": status}
+
+
 @app.post("/api/admin/plans")
 def admin_create_plan(request: Request, req: PlanRequest):
     account_id = subscriptions.account_for_request(request)

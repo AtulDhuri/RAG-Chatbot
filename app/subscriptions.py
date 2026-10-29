@@ -535,6 +535,35 @@ def promote_faq(account_id: str, site_id: str, question: str, answer: str, *, pi
         cur.execute("INSERT INTO faqs(account_id,website_id,question,answer,pinned,locked) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (website_id,question) DO UPDATE SET answer=EXCLUDED.answer,pinned=EXCLUDED.pinned,locked=EXCLUDED.locked,updated_at=now()", (account_id, site_id, question[:2000], answer[:10000], pinned, locked))
 
 
+def admin_sites() -> list[dict]:
+    if not using_db():
+        return []
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT w.domain,a.email,COALESCE(p.name,s.plan_id,'No plan'),COALESCE(s.status,'none'),w.created_at,w.active "
+            "FROM websites w JOIN accounts a ON a.id=w.account_id "
+            "LEFT JOIN LATERAL (SELECT plan_id,status FROM subscriptions WHERE account_id=w.account_id ORDER BY updated_at DESC LIMIT 1) s ON TRUE "
+            "LEFT JOIN plans p ON p.id=s.plan_id "
+            "ORDER BY w.created_at DESC"
+        )
+        rows = cur.fetchall()
+    return [
+        {"domain": row[0], "customer_email": row[1], "plan": row[2], "subscription_status": row[3], "created_at": row[4], "active": row[5]}
+        for row in rows
+    ]
+
+
+def admin_site_account(domain: str) -> str:
+    if not using_db():
+        raise HTTPException(503, "Website administration requires PostgreSQL")
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT account_id FROM websites WHERE domain=%s AND active", (normalize_domain(domain),))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, "Website not found")
+    return str(row[0])
+
+
 def analytics_summary(account_id: str) -> dict:
     if not using_db():
         return {"conversations": 0, "cache_hits": 0, "cache_hit_rate": 0, "top_questions": []}
