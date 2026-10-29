@@ -51,6 +51,7 @@
   }
 
   var DOMAIN = detectDomain();
+  var INSTALLATION_TOKEN = (current.getAttribute("data-installation-token") || "").trim();
   var TITLE = (current.getAttribute("data-title") || "Ask about this site").trim();
   var ACCENT = (current.getAttribute("data-accent") || "#2563eb").trim();
 
@@ -164,7 +165,7 @@
     registered = true;
     fetch(API_BASE + "/api/register", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, INSTALLATION_TOKEN ? { "X-Installation-Token": INSTALLATION_TOKEN } : {}),
       body: JSON.stringify({ domain: DOMAIN }),
     }).catch(function () {
       /* non-fatal: chat will register on demand too */
@@ -191,7 +192,9 @@
     if (statusTimer) clearTimeout(statusTimer);
 
     function tick() {
-      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN))
+      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN) + (INSTALLATION_TOKEN ? "&token=" + encodeURIComponent(INSTALLATION_TOKEN) : ""), {
+        headers: INSTALLATION_TOKEN ? { "X-Installation-Token": INSTALLATION_TOKEN } : {},
+      })
         .then(function (r) { return r.json(); })
         .then(function (s) {
           if (!s) return;
@@ -235,12 +238,19 @@
 
     fetch(API_BASE + "/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, INSTALLATION_TOKEN ? { "X-Installation-Token": INSTALLATION_TOKEN } : {}),
       body: JSON.stringify({ domain: DOMAIN, message: text }),
     })
       .then(function (r) {
-        if (r.status === 429) throw new Error("rate");
-        return r.json();
+        return r.json().then(function (data) {
+          if (!r.ok) {
+            var err = new Error(data && data.detail ? data.detail : "request");
+            err.status = r.status;
+            err.payload = data;
+            throw err;
+          }
+          return data;
+        });
       })
       .then(function (data) {
         typing.remove();
@@ -248,8 +258,13 @@
       })
       .catch(function (err) {
         typing.remove();
-        if (err && err.message === "rate") {
-          addBot("You're sending messages too quickly. Please wait a moment.");
+        var detail = err && err.payload && err.payload.detail;
+        if (err && err.status === 429) {
+          addBot(detail || "Your monthly chat limit has been reached. Please upgrade your plan.");
+        } else if (err && err.status === 403) {
+          addBot(detail || "Subscription ended, Please connect " + DOMAIN);
+        } else if (err && err.status === 401) {
+          addBot("This chat installation is not configured for this website.");
         } else {
           addBot("Something went wrong reaching the assistant. Please try again.");
         }

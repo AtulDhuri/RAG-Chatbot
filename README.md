@@ -66,7 +66,7 @@ uvicorn app.main:app --reload --port 8000
 Add this to the site's main page:
 
 ```html
-<script src="http://localhost:8000/widget.js" defer></script>
+<script src="https://your-host/widget.js" data-installation-token="YOUR_SITE_TOKEN" defer></script>
 ```
 
 The widget auto-detects the page's domain, registers it (triggering a crawl on first use),
@@ -96,8 +96,15 @@ Response:
 
 If the domain hasn't been crawled yet, `status` is `"indexing"` and a crawl is kicked off.
 
-## Notes
 
-- Prototype auth: open CORS + rate limiting. Add per-domain API keys before production.
-- Provider is OpenAI, read from env; the vector store and LLM calls are isolated in
-  `vectorstore.py` / `rag.py` so you can swap in Ollama or another provider later.
+## Subscriptions and installation tokens
+
+The production flow uses Postgres when `DATABASE_URL` is configured. Create an account with `POST /api/auth/signup`, sign in with `POST /api/auth/login`, then create a website with authenticated `POST /api/sites`:
+
+```json
+{"domain":"example.com"}
+```
+
+Put the returned `installation_token` in the widget script as `data-installation-token`. The server resolves the website from the hashed token and never trusts a browser-supplied domain as authorization. Chat usage is reserved atomically per website and billing period. The seeded Starter plan allows 500 chats. An inactive subscription returns the exact message `Subscription ended, Please connect {domain}`. Razorpay subscriptions and signed, replay-safe subscription webhooks are enabled when the Razorpay settings are present.
+
+Without `DATABASE_URL`, local development keeps the original domain-only demo flow and uses process-local auth/subscription state. That fallback is not durable or safe for multiple replicas; use Supabase/Postgres for production.

@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 150
 
+    # ---- Subscription / authentication ----
+    session_ttl_seconds: int = 2592000
+    starter_chat_limit: int = 500
+    razorpay_key_id: str = ""
+    razorpay_key_secret: str = ""
+    razorpay_webhook_secret: str = ""
+    razorpay_plan_starter: str = ""
+    public_app_url: str = "http://localhost:8000"
+    admin_registration_code: str = ""
     # ---- Server ----
     allowed_origins: str = "*"
     chat_rate_limit: str = "30/minute"

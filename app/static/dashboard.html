@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chatbot dashboard</title>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#f3f4f6;color:#111827;margin:0;padding:32px}
+    main{max-width:720px;margin:auto}.card{background:white;padding:24px;border-radius:14px;box-shadow:0 5px 24px #0001;margin-bottom:18px}
+    h1{margin-top:0} input,button{font:inherit;padding:10px 12px;border-radius:8px} input{border:1px solid #d1d5db;width:100%;margin:6px 0 12px;box-sizing:border-box} button{border:0;background:#2563eb;color:white;cursor:pointer;margin:4px 4px 4px 0} button.secondary{background:#6b7280} button:disabled{opacity:.5}.hidden{display:none}.status{min-height:24px;color:#374151}.error{color:#b91c1c}.token{word-break:break-all;background:#f3f4f6;padding:12px;border-radius:8px}
+  </style>
+</head>
+<body>
+<main>
+  <section class="card hidden" id="auth-card">
+    <h1>Chatbot customer dashboard</h1>
+    <form id="auth-form">
+      <label>Email<input id="email" type="email" required autocomplete="email"></label>
+      <label>Password<input id="password" type="password" minlength="10" required autocomplete="current-password"></label>
+      <button type="submit">Log in</button><button type="button" class="secondary" id="register">Create account</button>
+    </form>
+  </section>
+  <section class="card hidden" id="dashboard-card">
+    <h1>Subscription</h1>
+    <p id="account"></p>
+    <p>Starter plan: 500 chatbot answers per billing period.</p>
+    <button id="subscribe">Subscribe with Razorpay</button><button class="secondary" id="logout">Log out</button>
+    <h2>Connect a website</h2>
+    <form id="site-form"><input id="domain" placeholder="https://example.com" required><button type="submit">Create installation token</button></form>
+    <div id="site-result"></div>
+  </section>
+  <p class="status" id="status"></p>
+</main>
+<script>
+(function(){
+  var api=location.origin, status=document.getElementById('status'), auth=document.getElementById('auth-card'), dash=document.getElementById('dashboard-card');
+  function show(text,error){status.textContent=text||'';status.className='status'+(error?' error':'');}
+  function request(path, options){options=options||{};options.credentials='same-origin';return fetch(api+path,options).then(function(r){return r.text().then(function(raw){var d;try{d=raw?JSON.parse(raw):{};}catch(_){throw new Error('Server error ('+r.status+'). Check the API terminal logs.');}if(!r.ok)throw new Error(d.detail||'Request failed');return d;});});}
+  function refresh(){request('/api/auth/me').then(function(me){auth.classList.add('hidden');dash.classList.remove('hidden');document.getElementById('account').textContent='Signed in as '+me.email;}).catch(function(){window.location.replace('/login');});}
+  document.getElementById('auth-form').onsubmit=function(e){
+    e.preventDefault();
+    var emailValue=document.getElementById('email').value.trim();
+    var passwordValue=document.getElementById('password').value;
+    request('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:emailValue,password:passwordValue})}).then(function(){show('Logged in.');refresh();}).catch(function(e){show(e.message,true);});
+  };
+  document.getElementById('register').onclick=function(){
+    var emailValue=document.getElementById('email').value.trim();
+    var passwordValue=document.getElementById('password').value;
+    if (!emailValue || passwordValue.length < 10) { show('Enter a valid email and a password with at least 10 characters.',true); return; }
+    request('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:emailValue,password:passwordValue})}).then(function(){show('Account created. You can now log in.');}).catch(function(e){show(e.message,true);});
+  };
+  document.getElementById('logout').onclick=function(){request('/api/auth/logout',{method:'POST'}).then(function(){show('Logged out.');refresh();});};
+  document.getElementById('site-form').onsubmit=function(e){e.preventDefault();var requestedDomain=document.getElementById('domain').value;request('/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain:requestedDomain})}).then(function(d){var result=document.getElementById('site-result');result.innerHTML='<p>Copy this installation snippet into the registered website:</p><div class="token"></div><p>Keep the installation token private.</p>';result.querySelector('.token').textContent='<scr'+'ipt src="'+api+'/widget.js" data-domain="'+d.domain+'" data-installation-token="'+d.installation_token+'" defer></scr'+'ipt>';}).catch(function(e){show(e.message,true);});};
+  var selectedPlan=new URLSearchParams(location.search).get('plan_id')||'starter';
+  document.getElementById('subscribe').textContent='Subscribe to '+selectedPlan;
+  document.getElementById('subscribe').onclick=function(){request('/api/billing/create-subscription?plan_id='+encodeURIComponent(selectedPlan),{method:'POST'}).then(function(d){var checkout=new Razorpay({key:d.key_id,subscription_id:d.subscription_id,name:'Website Chatbot',description:selectedPlan+' chatbot subscription',handler:function(response){request('/api/billing/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(response)}).then(function(){show('Payment verified. Subscription activated.');}).catch(function(e){show(e.message,true);});},modal:{ondismiss:function(){show('Payment window closed.');}}});checkout.open();}).catch(function(e){show(e.message,true);});};
+  refresh();
+})();
+</script>
+</body>
+</html>

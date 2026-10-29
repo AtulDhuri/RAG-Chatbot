@@ -1,0 +1,23 @@
+-- Idempotent account, site, plan, subscription, auth-session, usage, and webhook schema.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE TABLE IF NOT EXISTS accounts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('customer','admin')), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, name TEXT NOT NULL, chat_limit INTEGER NOT NULL, website_limit INTEGER NOT NULL DEFAULT 1, indexed_page_limit INTEGER NOT NULL DEFAULT 100, price_amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'INR', billing_interval TEXT NOT NULL DEFAULT 'monthly', razorpay_plan_id TEXT UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE);
+CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, plan_id TEXT NOT NULL REFERENCES plans(id), status TEXT NOT NULL, start_date TIMESTAMPTZ, end_date TIMESTAMPTZ, current_period_start TIMESTAMPTZ, current_period_end TIMESTAMPTZ, razorpay_customer_id TEXT UNIQUE, razorpay_subscription_id TEXT UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS websites (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, domain TEXT NOT NULL UNIQUE, installation_token_hash TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS usage (website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, period TEXT NOT NULL, chat_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (website_id, period));
+CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, received_at TIMESTAMPTZ NOT NULL DEFAULT now());
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'customer';
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS website_limit INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS indexed_page_limit INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS price_amount INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS currency TEXT NOT NULL DEFAULT 'INR';
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS billing_interval TEXT NOT NULL DEFAULT 'monthly';
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS razorpay_plan_id TEXT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS razorpay_subscription_id TEXT UNIQUE;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS start_date TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS end_date TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_start TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ;
+ALTER TABLE websites ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;
+INSERT INTO plans(id, name, chat_limit) VALUES ('starter', 'Starter', 500) ON CONFLICT (id) DO NOTHING;
