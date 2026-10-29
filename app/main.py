@@ -474,7 +474,11 @@ def chat_stream(request: Request, req: ChatRequest):
         return StreamingResponse(
             iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
         )
 
     cache_key = cache.key(account_id, site_id, domain, req.language, req.message)
@@ -484,7 +488,11 @@ def chat_stream(request: Request, req: ChatRequest):
         return StreamingResponse(
             iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
         )
 
     indexer.ensure_indexed(domain, max_pages=subscriptions.indexed_page_limit(account_id))
@@ -498,7 +506,11 @@ def chat_stream(request: Request, req: ChatRequest):
         return StreamingResponse(
             iter([f"data: {json.dumps(payload)}\n\n"]),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
         )
 
     subscriptions.enforce_chat_quota(site_id, account_id, domain)
@@ -506,17 +518,27 @@ def chat_stream(request: Request, req: ChatRequest):
 
     def events():
         final = None
-        for event in rag.stream_answer(domain, req.message, language=req.language):
-            if event["type"] == "complete":
-                final = event
-            yield f"data: {json.dumps(event)}\n\n"
-        if final:
-            cache.set(cache_key, {"answer": final["answer"], "sources": final["sources"]})
+        try:
+            # Flush a real SSE event before the embedding/model work begins.
+            yield "data: {\"type\":\"progress\",\"message\":\"Finding the best information...\"}\n\n"
+            for event in rag.stream_answer(domain, req.message, language=req.language):
+                if event["type"] == "complete":
+                    final = event
+                yield f"data: {json.dumps(event)}\n\n"
+            if final:
+                cache.set(cache_key, {"answer": final["answer"], "sources": final["sources"]})
+        except Exception:
+            logger.exception("Streaming answer failed for domain=%s", domain)
+            yield "data: {\"type\":\"error\",\"message\":\"The assistant could not complete this answer. Please try again.\"}\n\n"
 
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

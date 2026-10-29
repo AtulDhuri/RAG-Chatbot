@@ -242,8 +242,10 @@
     setBusy(true);
     setStatus("Preparing your answer...", "busy");
     var typing = addTyping();
-    var botEl = null;
-    var answer = "";
+    var receivedEvent = false;
+    var receivedComplete = false;
+    var streamError = null;
+    var requestBody = { domain: DOMAIN, message: text };
 
     fetch(API_BASE + "/api/chat/stream", {
       method: "POST",
@@ -271,8 +273,14 @@
             buffer = lines.pop() || "";
             lines.forEach(function (line) {
               if (line.indexOf("data: ") !== 0) return;
+              receivedEvent = true;
               var event = JSON.parse(line.slice(6));
-              if (event.type === "token") {
+              if (event.type === "progress") {
+                setStatus(event.message || "Preparing your answer...", "busy");
+              } else if (event.type === "error") {
+                streamError = new Error(event.message || "stream");
+                throw streamError;
+              } else if (event.type === "token") {
                 if (!botEl) {
                   typing.remove();
                   botEl = addBot("");
@@ -281,6 +289,7 @@
                 botEl.firstChild.textContent = answer;
                 scroll();
               } else if (event.type === "complete") {
+                receivedComplete = true;
                 if (event.status === "indexing") {
                   setStatus("Still reading this website. Please try again shortly.", "busy");
                 } else {
