@@ -38,6 +38,7 @@ class Settings(BaseSettings):
 
     # ---- Response cache / distributed controls ----
     redis_url: str = ""
+    use_crawl_queue: bool = True
     cache_ttl_seconds: int = 86400
     unauthorized_threshold: int = 50
     unauthorized_window_seconds: int = 900
@@ -55,6 +56,8 @@ class Settings(BaseSettings):
     admin_registration_code: str = ""
     # ---- Server ----
     allowed_origins: str = "*"
+    # Development-only browser testing from localhost. Keep false in production.
+    allow_local_test_origins: bool = False
     chat_rate_limit: str = "30/minute"
 
     @property

@@ -21,5 +21,5 @@ setuptools==80.9.0
 pytest==8.3.4
 context.dev==2.25.0
 # ---- Postgres / pgvector vector store and subscriptions ----
-psycopg[binary]==3.2.3
+psycopg[binary,pool]==3.2.3
 pgvector==0.3.6

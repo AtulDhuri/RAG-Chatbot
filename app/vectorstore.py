@@ -8,6 +8,8 @@ import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from functools import lru_cache
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -23,6 +25,9 @@ _USE_PGVECTOR = _settings.vector_backend.lower() == "pgvector" or (
 )
 _PG_SCHEMA_LOCK = threading.Lock()
 _PG_SCHEMA_READY = False
+_PG_EMBED_CACHE: dict[str, tuple[float, list[float]]] = {}
+_PG_EMBED_CACHE_LOCK = threading.Lock()
+_PG_EMBED_CACHE_TTL = 3600
 
 if not _USE_PGVECTOR:
     import chromadb
@@ -47,18 +52,30 @@ def _get_collection(domain: str):
     )
 
 
+@lru_cache(maxsize=1)
+def _pg_pool():
+    from psycopg_pool import ConnectionPool
+    return ConnectionPool(
+        conninfo=_settings.database_url,
+        min_size=1,
+        max_size=8,
+        kwargs={"autocommit": False, "prepare_threshold": None},
+        open=True,
+    )
+
+
+@contextmanager
 def _pg_conn():
-    import psycopg
     from pgvector.psycopg import register_vector
-    conn = psycopg.connect(_settings.database_url, autocommit=False, prepare_threshold=None)
-    register_vector(conn)
     global _PG_SCHEMA_READY
-    if not _PG_SCHEMA_READY:
-        with _PG_SCHEMA_LOCK:
-            if not _PG_SCHEMA_READY:
-                _ensure_pg_schema(conn)
-                _PG_SCHEMA_READY = True
-    return conn
+    with _pg_pool().connection() as conn:
+        register_vector(conn)
+        if not _PG_SCHEMA_READY:
+            with _PG_SCHEMA_LOCK:
+                if not _PG_SCHEMA_READY:
+                    _ensure_pg_schema(conn)
+                    _PG_SCHEMA_READY = True
+        yield conn
 
 
 def _ensure_pg_schema(conn) -> None:
@@ -169,9 +186,21 @@ def index_documents(domain: str, records: list[dict], *, chunk_fn) -> int:
     return len(docs)
 
 
+def _embed_one(text: str) -> list[float]:
+    now = time.time()
+    with _PG_EMBED_CACHE_LOCK:
+        cached = _PG_EMBED_CACHE.get(text)
+        if cached and cached[0] > now:
+            return list(cached[1])
+    embedding = _embed([text])[0]
+    with _PG_EMBED_CACHE_LOCK:
+        _PG_EMBED_CACHE[text] = (now + _PG_EMBED_CACHE_TTL, embedding)
+    return embedding
+
+
 def query(domain: str, question: str, *, top_k: int) -> list[dict]:
     if _USE_PGVECTOR:
-        q_emb = _embed([question])[0]
+        q_emb = _embed_one(question)
         with _pg_conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT d.content,d.url,d.title,1-(d.embedding <=> %s::vector) AS score FROM vector_documents d JOIN vector_indexes i ON i.domain=d.domain AND i.active_version=d.version WHERE d.domain=%s ORDER BY d.embedding <=> %s::vector LIMIT %s", (q_emb, domain, q_emb, max(1, top_k)))
             return [{"text": r[0], "url": r[1], "title": r[2], "score": float(r[3])} for r in cur.fetchall()]

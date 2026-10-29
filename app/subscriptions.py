@@ -21,11 +21,14 @@ from fastapi import HTTPException, Request
 
 from .config import get_settings
 from .crawler import normalize_domain
+from .db import connection as pooled_connection
 from . import security
 
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 _lock = threading.Lock()
+_schema_lock = threading.Lock()
+_schema_ready = False
 _memory: dict[str, dict[str, Any]] = {"accounts": {}, "sessions": {}, "sites": {}, "usage": {}}
 
 SCHEMA = """
@@ -61,11 +64,34 @@ def using_db() -> bool:
     return bool(_settings.database_url)
 
 def _conn():
-    conn = psycopg.connect(_settings.database_url, autocommit=True, prepare_threshold=None)
-    with conn.cursor() as cur:
-        cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-        cur.execute(SCHEMA)
-    return conn
+    """Borrow a pooled connection and initialize the schema only once."""
+    global _schema_ready
+    context = pooled_connection()
+    conn = context.__enter__()
+    try:
+        if not _schema_ready:
+            with _schema_lock:
+                if not _schema_ready:
+                    with conn.cursor() as cur:
+                        cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+                        cur.execute(SCHEMA)
+                    _schema_ready = True
+        return _PooledConnection(context, conn)
+    except Exception:
+        context.__exit__(*__import__('sys').exc_info())
+        raise
+
+
+class _PooledConnection:
+    def __init__(self, context, conn):
+        self._context = context
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, *args):
+        return self._context.__exit__(*args)
 
 def _hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -234,7 +260,10 @@ def _origin_matches_domain(request: Request, domain: str) -> bool:
     if not origin:
         return True  # Non-browser clients do not send Origin; token still authenticates them.
     parsed = urlparse(origin)
-    origin_domain = normalize_domain(parsed.netloc or parsed.path)
+    origin_host = parsed.netloc or parsed.path
+    if _settings.allow_local_test_origins and origin_host.split(":", 1)[0] in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    origin_domain = normalize_domain(origin_host)
     return origin_domain == normalize_domain(domain)
 
 

@@ -240,6 +240,7 @@
     input.value = "";
     addUser(text);
     setBusy(true);
+    setStatus("Preparing your answer...", "busy");
     var typing = addTyping();
     var botEl = null;
     var answer = "";
@@ -280,6 +281,14 @@
                 botEl.firstChild.textContent = answer;
                 scroll();
               } else if (event.type === "complete") {
+                if (event.status === "indexing") {
+                  setStatus("Still reading this website. Please try again shortly.", "busy");
+                } else {
+                  setStatus("Ready", "ready");
+                  setTimeout(function () {
+                    if (statusEl) statusEl.classList.add("ragc-hidden");
+                  }, 2500);
+                }
                 if (!botEl) {
                   typing.remove();
                   botEl = addBot(event.answer || "Sorry, I couldn't come up with an answer.");

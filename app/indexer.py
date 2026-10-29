@@ -7,7 +7,7 @@ import threading
 from .config import get_settings
 from .crawler import crawl_domain, normalize_domain
 from .chunking import chunk_text
-from . import cache, vectorstore
+from . import cache, jobs, vectorstore
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
@@ -25,7 +25,8 @@ _progress: dict[str, dict] = {}
 def is_indexing(domain: str) -> bool:
     domain = normalize_domain(domain)
     with _lock:
-        return domain in _in_progress
+        local = domain in _in_progress
+    return local or (_settings.use_crawl_queue and jobs.is_queued(domain))
 
 
 def _set_progress(domain: str, **fields) -> None:
@@ -59,6 +60,15 @@ def get_progress(domain: str) -> dict:
     if out is not None:
         out["indexing"] = is_indexing(domain)
         return out
+    if _settings.use_crawl_queue and jobs.is_queued(domain):
+        return {
+            "phase": "queued",
+            "pages_done": 0,
+            "pages_known": 0,
+            "chunks": 0,
+            "last_url": "",
+            "indexing": True,
+        }
     # No active/finished crawl recorded this process lifetime.
     indexed = vectorstore.is_indexed(domain)
     return {
@@ -153,8 +163,12 @@ def ensure_indexed(domain: str, *, force: bool = False, max_pages: int | None = 
     if is_indexing(domain):
         return "indexing"
 
-    # Run crawling in this API process. This keeps the setup simple and works
-    # without Redis or a separate worker process.
+    if _settings.use_crawl_queue and _settings.redis_url:
+        if jobs.enqueue_reindex(domain, force=force, max_pages=max_pages):
+            # A worker owns the crawl, so the web process stays responsive.
+            return "ready" if vectorstore.is_indexed(domain) else "started"
+
+    # Local fallback for development or when Redis is unavailable.
     threading.Thread(target=reindex, args=(domain, max_pages), daemon=True).start()
 
     # If we already have (stale) content, answers can still be served meanwhile.
