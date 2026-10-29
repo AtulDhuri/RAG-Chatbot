@@ -84,7 +84,7 @@ class ChatResponse(BaseModel):
 class SignupRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     password: str = Field(..., min_length=10, max_length=200)
-    plan_id: str = Field(..., min_length=2, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
+    plan_id: str = Field(default="", max_length=40, pattern=r"^[A-Za-z0-9_-]*$")
     role: str = Field(default="customer", pattern=r"^(customer|admin)$")
     admin_code: str = Field(default="", max_length=200)
 

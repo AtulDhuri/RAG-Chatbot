@@ -93,7 +93,7 @@ def _expiry() -> datetime:
 def _active(status: str, end: Any) -> bool:
     return status in {"active", "trialing"} and end is not None and end > datetime.now(timezone.utc)
 
-def signup(email: str, password: str, *, plan_id: str, role: str = "customer", admin_code: str = ""):
+def signup(email: str, password: str, *, plan_id: str = "", role: str = "customer", admin_code: str = ""):
     email = email.strip().lower()
     if role not in {"customer", "admin"}:
         raise HTTPException(400, "Invalid account role")
@@ -103,18 +103,20 @@ def signup(email: str, password: str, *, plan_id: str, role: str = "customer", a
     if using_db():
         try:
             with _conn() as conn, conn.cursor() as cur:
-                cur.execute("SELECT id FROM plans WHERE id=%s AND active=TRUE", (plan_id,))
-                if not cur.fetchone():
-                    raise HTTPException(400, "Selected plan is unavailable")
+                if role == "customer":
+                    cur.execute("SELECT id FROM plans WHERE id=%s AND active=TRUE", (plan_id,))
+                    if not cur.fetchone():
+                        raise HTTPException(400, "Selected plan is unavailable")
                 try:
                     cur.execute("INSERT INTO accounts(email,password_hash,role) VALUES (%s,%s,%s) RETURNING id", (email, _hash_password(password), role))
                 except psycopg.errors.UniqueViolation:
                     raise HTTPException(409, "Email already registered")
                 account_id = str(cur.fetchone()[0])
-                cur.execute(
-                    "INSERT INTO subscriptions(account_id,plan_id,status) VALUES (%s,%s,'pending')",
-                    (account_id, plan_id),
-                )
+                if role == "customer":
+                    cur.execute(
+                        "INSERT INTO subscriptions(account_id,plan_id,status) VALUES (%s,%s,'pending')",
+                        (account_id, plan_id),
+                    )
         except HTTPException:
             raise
         except Exception as exc:
