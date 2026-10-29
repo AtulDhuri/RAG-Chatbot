@@ -13,13 +13,14 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
 
-    # ---- Crawler ----
-    crawl_max_pages: int = 100
-    crawl_ttl_seconds: int = 86400
-    crawl_respect_robots: bool = True
-    crawl_timeout: int = 15
+    # ---- Context.dev ----
+    context_dev_api_key: str = ""
+    crawl_backend: str = "auto"
 
     # ---- Vector store ----
+    vector_backend: str = "auto"
+    database_url: str = ""
+    embedding_dim: int = 1536
     chroma_persist_dir: str = "./data/chroma"
 
     # ---- Retrieval / chunking ----
