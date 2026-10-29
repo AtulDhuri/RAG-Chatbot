@@ -56,9 +56,11 @@ class Settings(BaseSettings):
     @property
     def origins_list(self) -> list[str]:
         configured = self.allowed_origins.strip()
+        # The embeddable widget is intentionally cross-origin. It authenticates
+        # with a per-website installation token and never uses browser cookies,
+        # so wildcard CORS is safe for the widget API and avoids requiring the
+        # operator to update Render whenever a tenant adds a website.
         if configured == "*":
-            if self.public_app_url.startswith("https://"):
-                raise ValueError("ALLOWED_ORIGINS must be explicit when PUBLIC_APP_URL uses HTTPS")
             return ["*"]
         return [o.strip() for o in configured.split(",") if o.strip()]
 
