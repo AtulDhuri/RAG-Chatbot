@@ -241,26 +241,58 @@
     addUser(text);
     setBusy(true);
     var typing = addTyping();
+    var botEl = null;
+    var answer = "";
 
-    fetch(API_BASE + "/api/chat", {
+    fetch(API_BASE + "/api/chat/stream", {
       method: "POST",
       headers: Object.assign({ "Content-Type": "application/json" }, INSTALLATION_TOKEN ? { "X-Installation-Token": INSTALLATION_TOKEN } : {}),
       body: JSON.stringify({ domain: DOMAIN, message: text }),
     })
       .then(function (r) {
-        return r.json().then(function (data) {
-          if (!r.ok) {
+        if (!r.ok) {
+          return r.json().then(function (data) {
             var err = new Error(data && data.detail ? data.detail : "request");
             err.status = r.status;
             err.payload = data;
             throw err;
-          }
-          return data;
-        });
-      })
-      .then(function (data) {
-        typing.remove();
-        addBot(data.answer || "Sorry, I couldn't come up with an answer.", data.sources);
+          });
+        }
+        if (!r.body) throw new Error("stream unavailable");
+        var reader = r.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+
+        function read() {
+          return reader.read().then(function (part) {
+            buffer += decoder.decode(part.value || new Uint8Array(), { stream: !part.done });
+            var lines = buffer.split("\\n");
+            buffer = lines.pop() || "";
+            lines.forEach(function (line) {
+              if (line.indexOf("data: ") !== 0) return;
+              var event = JSON.parse(line.slice(6));
+              if (event.type === "token") {
+                if (!botEl) {
+                  typing.remove();
+                  botEl = addBot("");
+                }
+                answer += event.text || "";
+                botEl.firstChild.textContent = answer;
+                scroll();
+              } else if (event.type === "complete") {
+                if (!botEl) {
+                  typing.remove();
+                  botEl = addBot(event.answer || "Sorry, I couldn't come up with an answer.");
+                }
+                answer = event.answer || answer;
+                botEl.firstChild.textContent = answer;
+                appendSources(botEl, event.sources);
+              }
+            });
+            return part.done ? null : read();
+          });
+        }
+        return read();
       })
       .catch(function (err) {
         typing.remove();
@@ -314,6 +346,23 @@
     }
     body.appendChild(el);
     scroll();
+    return el;
+  }
+
+  function appendSources(el, sources) {
+    if (!sources || !sources.length || el.querySelector(".ragc-sources")) return;
+    var box = document.createElement("div");
+    box.className = "ragc-sources";
+    box.appendChild(document.createTextNode("Sources:"));
+    sources.slice(0, 3).forEach(function (u) {
+      var a = document.createElement("a");
+      a.href = u;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = u;
+      box.appendChild(a);
+    });
+    el.appendChild(box);
   }
 
   function addTyping() {

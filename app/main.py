@@ -1,11 +1,12 @@
 """FastAPI app: domain registration, chat, and the embeddable widget."""
+import json
 import logging
 from pathlib import Path
 from decimal import Decimal
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -455,6 +456,68 @@ def chat(request: Request, req: ChatRequest):
     cache.set(cache_key, {"answer": result["answer"], "sources": result["sources"]})
     status = "indexing" if indexer.is_indexing(domain) else "ready"
     return ChatResponse(answer=result["answer"], sources=result["sources"], status=status, cache_hit=False)
+
+
+@app.post("/api/chat/stream")
+@limiter.limit(settings.chat_rate_limit)
+def chat_stream(request: Request, req: ChatRequest):
+    """Stream tokens so the visitor sees an answer before completion."""
+    domain = normalize_domain(req.domain)
+    security.enforce_distributed_rate_limit(request, domain)
+    site_id, account_id = subscriptions.require_site(request, domain)
+    security.enforce_distributed_rate_limit(request, domain, tenant_id=account_id, website_id=site_id)
+    subscriptions.require_active_subscription(account_id, domain)
+
+    faq = subscriptions.faq_for_question(account_id, site_id, req.message)
+    if faq:
+        payload = {"type": "complete", "answer": faq["answer"], "sources": faq["sources"]}
+        return StreamingResponse(
+            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    cache_key = cache.key(account_id, site_id, domain, req.language, req.message)
+    cached = cache.get(cache_key)
+    if cached:
+        payload = {"type": "complete", "answer": cached["answer"], "sources": cached.get("sources", [])}
+        return StreamingResponse(
+            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    indexer.ensure_indexed(domain, max_pages=subscriptions.indexed_page_limit(account_id))
+    if not vectorstore.is_indexed(domain):
+        payload = {
+            "type": "complete",
+            "answer": "I'm still reading through this website to learn about it. Please ask again in a minute or two.",
+            "sources": [],
+            "status": "indexing",
+        }
+        return StreamingResponse(
+            iter([f"data: {json.dumps(payload)}\\n\\n"]),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    subscriptions.enforce_chat_quota(site_id, account_id, domain)
+    subscriptions.record_chat_query(site_id, account_id, domain, req.message)
+
+    def events():
+        final = None
+        for event in rag.stream_answer(domain, req.message, language=req.language):
+            if event["type"] == "complete":
+                final = event
+            yield f"data: {json.dumps(event)}\\n\\n"
+        if final:
+            cache.set(cache_key, {"answer": final["answer"], "sources": final["sources"]})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/widget.js")

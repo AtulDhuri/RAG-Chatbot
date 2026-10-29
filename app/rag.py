@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -93,3 +94,50 @@ def answer(domain: str, question: str, *, language: str = "auto") -> dict:
             sources.append(url)
 
     return {"answer": reply.strip(), "sources": sources}
+
+
+def stream_answer(domain: str, question: str, *, language: str = "auto") -> Iterator[dict]:
+    """Yield answer text as soon as the model produces it."""
+    hits = vectorstore.query(domain, question, top_k=_settings.retrieval_top_k)
+    if not hits:
+        yield {
+            "type": "complete",
+            "answer": (
+                "I don't have any indexed content for this site yet, so I can't "
+                "answer that right now. Please try again in a moment."
+            ),
+            "sources": [],
+        }
+        return
+
+    context = _build_context(hits)
+    user_prompt = (
+        f"Context passages from the website:\n\n{context}\n\n"
+        f"Visitor question: {question}\n"
+        f"Answer in the requested language when it is not 'auto': {language}"
+    )
+    response = _openai.chat.completions.create(
+        model=_settings.openai_chat_model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+        max_tokens=_settings.chat_max_tokens,
+        stream=True,
+    )
+    answer_parts: list[str] = []
+    for event in response:
+        piece = event.choices[0].delta.content if event.choices else None
+        if piece:
+            answer_parts.append(piece)
+            yield {"type": "token", "text": piece}
+
+    seen: set[str] = set()
+    sources: list[str] = []
+    for hit in hits:
+        url = hit.get("url", "")
+        if url and url not in seen:
+            seen.add(url)
+            sources.append(url)
+    yield {"type": "complete", "answer": "".join(answer_parts).strip(), "sources": sources}
