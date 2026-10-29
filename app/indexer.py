@@ -7,7 +7,7 @@ import threading
 from .config import get_settings
 from .crawler import crawl_domain, normalize_domain
 from .chunking import chunk_text
-from . import cache, jobs, vectorstore
+from . import cache, vectorstore
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
@@ -25,8 +25,7 @@ _progress: dict[str, dict] = {}
 def is_indexing(domain: str) -> bool:
     domain = normalize_domain(domain)
     with _lock:
-        local = domain in _in_progress
-    return local or jobs.is_queued(domain)
+        return domain in _in_progress
 
 
 def _set_progress(domain: str, **fields) -> None:
@@ -55,8 +54,11 @@ def get_progress(domain: str) -> dict:
         snap = _progress.get(domain)
         if snap is not None:
             out = dict(snap)
-            out["indexing"] = is_indexing(domain)
-            return out
+        else:
+            out = None
+    if out is not None:
+        out["indexing"] = is_indexing(domain)
+        return out
     # No active/finished crawl recorded this process lifetime.
     indexed = vectorstore.is_indexed(domain)
     return {
@@ -83,9 +85,10 @@ def _mark_done(domain: str) -> None:
         _in_progress.discard(domain)
 
 
-def reindex(domain: str) -> int:
+def reindex(domain: str, max_pages: int | None = None) -> int:
     """Crawl and (re)index a domain synchronously. Returns chunk count."""
     domain = normalize_domain(domain)
+    crawl_limit = max(1, max_pages or _settings.crawl_max_pages)
     if not _mark_start(domain):
         logger.info("Crawl already in progress for %s", domain)
         return -1
@@ -108,7 +111,7 @@ def reindex(domain: str) -> int:
     try:
         pages = crawl_domain(
             domain,
-            max_pages=_settings.crawl_max_pages,
+            max_pages=crawl_limit,
             timeout=_settings.crawl_timeout,
             respect_robots=_settings.crawl_respect_robots,
             progress_cb=_on_progress,
@@ -136,7 +139,7 @@ def reindex(domain: str) -> int:
         _mark_done(domain)
 
 
-def ensure_indexed(domain: str, *, force: bool = False) -> str:
+def ensure_indexed(domain: str, *, force: bool = False, max_pages: int | None = None) -> str:
     """Ensure a domain has fresh content.
 
     Returns a status string: "ready", "indexing", or "started".
@@ -150,12 +153,9 @@ def ensure_indexed(domain: str, *, force: bool = False) -> str:
     if is_indexing(domain):
         return "indexing"
 
-    # Redis-backed deployments use the durable worker queue. Local development
-    # keeps the lightweight thread fallback when Redis is unavailable.
-    if _settings.redis_url and jobs.enqueue_reindex(domain, force=force):
-        _set_progress(domain, phase="crawling")
-    else:
-        threading.Thread(target=reindex, args=(domain,), daemon=True).start()
+    # Run crawling in this API process. This keeps the setup simple and works
+    # without Redis or a separate worker process.
+    threading.Thread(target=reindex, args=(domain, max_pages), daemon=True).start()
 
     # If we already have (stale) content, answers can still be served meanwhile.
     return "ready" if vectorstore.is_indexed(domain) else "started"

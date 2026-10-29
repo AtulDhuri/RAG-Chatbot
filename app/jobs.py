@@ -15,7 +15,7 @@ def _client():
     return Redis.from_url(_settings.redis_url, decode_responses=True, socket_timeout=0.5)
 
 
-def enqueue_reindex(domain: str, force: bool = False) -> bool:
+def enqueue_reindex(domain: str, force: bool = False, max_pages: int | None = None) -> bool:
     client = _client()
     if client is None:
         return False
@@ -23,7 +23,7 @@ def enqueue_reindex(domain: str, force: bool = False) -> bool:
     if not client.set(lock, "1", nx=True, ex=max(300, _settings.crawl_timeout * _settings.crawl_max_pages)):
         return True
     try:
-        client.rpush(_QUEUE, json.dumps({"domain": domain, "force": force}))
+        client.rpush(_QUEUE, json.dumps({"domain": domain, "force": force, "max_pages": max_pages}))
         return True
     except Exception:
         client.delete(lock)

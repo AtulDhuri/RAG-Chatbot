@@ -55,7 +55,6 @@ ALTER TABLE websites ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TR
 ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS normalized_question TEXT NOT NULL DEFAULT '';
 ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'auto';
 ALTER TABLE chat_queries ADD COLUMN IF NOT EXISTS cache_hit BOOLEAN NOT NULL DEFAULT FALSE;
-INSERT INTO plans(id, name, chat_limit) VALUES ('starter', 'Starter', 500) ON CONFLICT (id) DO NOTHING;
 """
 
 def using_db() -> bool:
@@ -94,7 +93,7 @@ def _expiry() -> datetime:
 def _active(status: str, end: Any) -> bool:
     return status in {"active", "trialing"} and end is not None and end > datetime.now(timezone.utc)
 
-def signup(email: str, password: str, *, role: str = "customer", admin_code: str = "") -> dict:
+def signup(email: str, password: str, *, plan_id: str, role: str = "customer", admin_code: str = ""):
     email = email.strip().lower()
     if role not in {"customer", "admin"}:
         raise HTTPException(400, "Invalid account role")
@@ -104,17 +103,17 @@ def signup(email: str, password: str, *, role: str = "customer", admin_code: str
     if using_db():
         try:
             with _conn() as conn, conn.cursor() as cur:
+                cur.execute("SELECT id FROM plans WHERE id=%s AND active=TRUE", (plan_id,))
+                if not cur.fetchone():
+                    raise HTTPException(400, "Selected plan is unavailable")
                 try:
                     cur.execute("INSERT INTO accounts(email,password_hash,role) VALUES (%s,%s,%s) RETURNING id", (email, _hash_password(password), role))
                 except psycopg.errors.UniqueViolation:
                     raise HTTPException(409, "Email already registered")
                 account_id = str(cur.fetchone()[0])
-                trial_start = datetime.now(timezone.utc)
-                trial_end = trial_start + timedelta(days=30)
                 cur.execute(
-                    "INSERT INTO subscriptions(account_id,plan_id,status,start_date,end_date,current_period_start,current_period_end) "
-                    "VALUES (%s,'starter','trialing',%s,%s,%s,%s)",
-                    (account_id, trial_start, trial_end, trial_start, trial_end),
+                    "INSERT INTO subscriptions(account_id,plan_id,status) VALUES (%s,%s,'pending')",
+                    (account_id, plan_id),
                 )
         except HTTPException:
             raise
@@ -122,13 +121,8 @@ def signup(email: str, password: str, *, role: str = "customer", admin_code: str
             logger.exception("Account registration failed")
             raise HTTPException(503, "Account service is unavailable. Check the database connection.") from exc
     else:
-        with _lock:
-            if email in _memory["accounts"]:
-                raise HTTPException(409, "Email already registered")
-            account_id = secrets.token_hex(16)
-            trial_end = time.time() + 30 * 86400
-            _memory["accounts"][email] = {"id": account_id, "password": _hash_password(password), "role": role, "subscription": {"status": "trialing", "limit": _settings.starter_chat_limit, "end": trial_end}}
-    return {"account_id": account_id, "email": email}
+        raise HTTPException(503, "Customer registration requires the configured database and an administrator-created plan")
+    return {"account_id": account_id, "email": email, "plan_id": plan_id}
 
 def login(email: str, password: str) -> str:
     email = email.strip().lower()
@@ -184,6 +178,7 @@ def create_site(account_id: str, domain: str) -> dict:
     domain = normalize_domain(domain)
     if not domain or "." not in domain:
         raise HTTPException(400, "Enter a valid public domain")
+    require_active_subscription(account_id, domain)
     installation_token = secrets.token_urlsafe(32)
     if using_db():
         with _conn() as conn, conn.cursor() as cur:
@@ -278,7 +273,7 @@ def require_active_subscription(account_id: str, domain: str) -> None:
     if not using_db():
         with _lock:
             account = next((a for a in _memory["accounts"].values() if a["id"] == account_id), None)
-            subscription = account.get("subscription", {})
+            subscription = account.get("subscription", {}) if account else {}
             if not account or subscription.get("status") not in {"active", "trialing"} or subscription.get("end", 0) <= time.time():
                 raise HTTPException(403, f"Subscription ended, Please connect {domain}")
         return
@@ -320,10 +315,50 @@ def mark_webhook(event_id: str) -> bool:
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("INSERT INTO webhook_events(event_id) VALUES (%s) ON CONFLICT DO NOTHING RETURNING event_id", (event_id,)); return cur.fetchone() is not None
 
-def apply_subscription(customer_id: str, subscription_id: str, status: str, period_end: int | None = None, account_id: str = "") -> None:
+def mark_subscription_pending(account_id: str, plan_id: str) -> None:
+    """Put an account into a non-usable state until paid checkout succeeds."""
+    if not using_db():
+        with _lock:
+            account = next((a for a in _memory["accounts"].values() if a["id"] == account_id), None)
+            if account:
+                account["subscription"]["status"] = "pending"
+        return
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE subscriptions SET plan_id=%s,status='pending',updated_at=now() WHERE account_id=%s",
+            (plan_id, account_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Subscription not found")
+
+
+def apply_subscription(customer_id: str, subscription_id: str, status: str, period_end: int | None = None, account_id: str = "", plan_id: str = "") -> None:
     if not using_db(): return
     end = datetime.fromtimestamp(period_end, timezone.utc) if period_end else None
-    with _conn() as conn, conn.cursor() as cur: cur.execute("UPDATE subscriptions SET status=%s,current_period_end=%s,razorpay_customer_id=NULLIF(%s,''),razorpay_subscription_id=NULLIF(%s,''),updated_at=now() WHERE account_id::text=%s OR razorpay_customer_id=%s OR razorpay_subscription_id=%s", (status,end,customer_id,subscription_id,account_id,customer_id,subscription_id))
+    with _conn() as conn, conn.cursor() as cur:
+        if plan_id:
+            cur.execute(
+                "UPDATE subscriptions SET plan_id=%s,status=%s,current_period_end=%s,razorpay_customer_id=NULLIF(%s,''),razorpay_subscription_id=NULLIF(%s,''),updated_at=now() WHERE account_id::text=%s OR razorpay_customer_id=%s OR razorpay_subscription_id=%s",
+                (plan_id, status, end, customer_id, subscription_id, account_id, customer_id, subscription_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE subscriptions SET status=%s,current_period_end=%s,razorpay_customer_id=NULLIF(%s,''),razorpay_subscription_id=NULLIF(%s,''),updated_at=now() WHERE account_id::text=%s OR razorpay_customer_id=%s OR razorpay_subscription_id=%s",
+                (status, end, customer_id, subscription_id, account_id, customer_id, subscription_id),
+            )
+
+
+def indexed_page_limit(account_id: str) -> int:
+    """Return the active plan's crawl limit for an account."""
+    if not using_db():
+        return 100
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT p.indexed_page_limit FROM subscriptions s JOIN plans p ON p.id=s.plan_id WHERE s.account_id=%s ORDER BY s.updated_at DESC LIMIT 1",
+            (account_id,),
+        )
+        row = cur.fetchone()
+    return max(1, int(row[0])) if row else 100
 
 
 def _admin_allowed(account_id: str) -> bool:
@@ -347,7 +382,7 @@ def require_admin(account_id: str) -> None:
 
 def list_plans(*, active_only: bool = True) -> list[dict]:
     if not using_db():
-        return [{"id": "starter", "name": "Starter", "chat_limit": _settings.starter_chat_limit, "website_limit": 1, "indexed_page_limit": 100, "price_amount": 0, "currency": "INR", "billing_interval": "monthly", "razorpay_plan_id": "", "active": True}]
+        return []
     with _conn() as conn, conn.cursor() as cur:
         query = "SELECT id,name,chat_limit,website_limit,indexed_page_limit,price_amount,currency,billing_interval,razorpay_plan_id,active FROM plans"
         if active_only:
@@ -382,9 +417,7 @@ def create_plan(plan: dict) -> dict:
 
 def razorpay_plan_id(plan_id: str) -> str:
     if not using_db():
-        if plan_id == "starter":
-            return _settings.razorpay_plan_starter
-        return ""
+        raise HTTPException(503, "Plans require the configured PostgreSQL database")
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT razorpay_plan_id FROM plans WHERE id=%s AND active=TRUE", (plan_id,))
         row = cur.fetchone()
@@ -429,7 +462,7 @@ def record_chat_query(site_id: str, account_id: str, domain: str, question: str,
 
 def usage_summary(account_id: str) -> dict:
     if not using_db():
-        return {"chat_count": 0, "chat_limit": _settings.starter_chat_limit, "remaining": _settings.starter_chat_limit, "queries": []}
+        raise HTTPException(503, "Plans require the configured PostgreSQL database")
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT p.name,p.chat_limit,s.current_period_start,s.current_period_end "

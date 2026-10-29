@@ -11,6 +11,6 @@ while True:
         continue
     domain = job["domain"]
     try:
-        indexer.reindex(domain)
+        indexer.reindex(domain, job.get("max_pages"))
     finally:
         jobs.release(domain)

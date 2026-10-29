@@ -19,7 +19,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url or "memory://")
+# Keep the app self-contained. Crawl jobs and rate limits run in this API process.
+limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
 
 app = FastAPI(title="RAG Website Chatbot", version="1.0.0")
 app.state.limiter = limiter
@@ -83,6 +84,7 @@ class ChatResponse(BaseModel):
 class SignupRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     password: str = Field(..., min_length=10, max_length=200)
+    plan_id: str = Field(..., min_length=2, max_length=40, pattern=r"^[A-Za-z0-9_-]+$")
     role: str = Field(default="customer", pattern=r"^(customer|admin)$")
     admin_code: str = Field(default="", max_length=200)
 
@@ -113,6 +115,7 @@ class RazorpayVerifyRequest(BaseModel):
     razorpay_payment_id: str = Field(..., min_length=1)
     razorpay_subscription_id: str = Field(..., min_length=1)
     razorpay_signature: str = Field(..., min_length=1)
+    plan_id: str = Field(default="", max_length=40, pattern=r"^[A-Za-z0-9_-]*$")
 
 
 class PlanRequest(BaseModel):
@@ -183,12 +186,14 @@ def admin_create_plan(request: Request, req: PlanRequest):
 
 
 @app.post("/api/billing/create-subscription")
-def create_subscription(request: Request, plan_id: str = "starter"):
+def create_subscription(request: Request, plan_id: str):
     """Create a Razorpay subscription using a database-managed plan."""
     account_id = subscriptions.account_for_request(request)
     razorpay_id = subscriptions.razorpay_plan_id(plan_id)
     if not settings.razorpay_key_id or not settings.razorpay_key_secret or not razorpay_id:
         raise HTTPException(status_code=503, detail="Razorpay billing is not configured")
+    # Paid-plan accounts stay blocked unless checkout is verified successfully.
+    subscriptions.mark_subscription_pending(account_id, plan_id)
     try:
         import razorpay
         client = razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
@@ -222,12 +227,14 @@ def verify_payment(request: Request, req: RazorpayVerifyRequest):
             "razorpay_signature": req.razorpay_signature,
         })
         subscription = client.subscription.fetch(req.razorpay_subscription_id)
+        notes = subscription.get("notes") or {}
         subscriptions.apply_subscription(
             str(subscription.get("customer_id", "")),
             req.razorpay_subscription_id,
             "active",
             subscription.get("end_at") or subscription.get("charge_at"),
             account_id,
+            str(notes.get("plan_id") or req.plan_id),
         )
         return {"verified": True, "status": "active"}
     except Exception as exc:
@@ -274,6 +281,7 @@ async def razorpay_webhook(request: Request):
             status,
             sub_entity.get("end_at") or sub_entity.get("charge_at"),
             str(notes.get("account_id", "")),
+            str(notes.get("plan_id", "")),
         )
     return {"received": True}
 
@@ -286,7 +294,7 @@ def health():
 @app.post("/api/auth/signup")
 @app.post("/api/auth/register")
 def signup(req: SignupRequest):
-    account = subscriptions.signup(req.email, req.password, role=req.role, admin_code=req.admin_code)
+    account = subscriptions.signup(req.email, req.password, plan_id=req.plan_id, role=req.role, admin_code=req.admin_code)
     token = subscriptions.login(req.email, req.password)
     response = JSONResponse({**account, "status": "registered", "role": req.role})
     response.set_cookie("session", token, httponly=True, secure=bool(settings.public_app_url.startswith("https://")), samesite="lax", max_age=settings.session_ttl_seconds)
@@ -335,7 +343,7 @@ def recrawl_site(request: Request, domain: str):
     subscriptions.require_active_subscription(account_id, domain)
     subscriptions.require_owned_site(account_id, domain)
     normalized = normalize_domain(domain)
-    status = indexer.ensure_indexed(normalized, force=True)
+    status = indexer.ensure_indexed(normalized, force=True, max_pages=subscriptions.indexed_page_limit(account_id))
     return {"domain": normalized, "status": status}
 
 
@@ -359,7 +367,11 @@ def register(request: Request, req: RegisterRequest):
     domain = normalize_domain(req.domain)
     site_id, account_id = subscriptions.require_site(request, domain)
     subscriptions.require_active_subscription(account_id, domain)
-    status = indexer.ensure_indexed(domain, force=req.force if not settings.database_url else False)
+    status = indexer.ensure_indexed(
+        domain,
+        force=req.force if not settings.database_url else False,
+        max_pages=subscriptions.indexed_page_limit(account_id),
+    )
     return RegisterResponse(
         domain=domain,
         status=status,
@@ -408,7 +420,7 @@ def chat(request: Request, req: ChatRequest):
         return ChatResponse(answer=cached["answer"], sources=cached.get("sources", []), status="ready", cache_hit=True)
 
     # Make sure content exists / is fresh; kicks off a background crawl if not.
-    indexer.ensure_indexed(domain)
+    indexer.ensure_indexed(domain, max_pages=subscriptions.indexed_page_limit(account_id))
     if not vectorstore.is_indexed(domain):
         return ChatResponse(
             answer="I'm still reading through this website to learn about it. Please ask again in a minute or two.",
