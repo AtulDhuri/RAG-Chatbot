@@ -363,7 +363,9 @@ def register(request: Request, req: RegisterRequest):
     return RegisterResponse(
         domain=domain,
         status=status,
-        indexed=vectorstore.is_indexed(domain),
+        # ensure_indexed returns ready only when an existing index is usable.
+        # Avoid a second database/vector-store round trip on the request path.
+        indexed=status == "ready",
     )
 
 
