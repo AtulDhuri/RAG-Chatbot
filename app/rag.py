@@ -29,10 +29,20 @@ SYSTEM_PROMPT = (
 
 
 def _build_context(hits: list[dict]) -> str:
-    blocks = []
+    """Build a bounded prompt context to reduce model input latency."""
+    blocks: list[str] = []
+    total = 0
+    limit = max(1000, _settings.context_max_chars)
     for i, h in enumerate(hits, 1):
         src = h.get("url", "")
-        blocks.append(f"[Passage {i}] (source: {src})\n{h['text']}")
+        block = f"[Passage {i}] (source: {src})\n{h['text']}"
+        remaining = limit - total
+        if remaining <= 0:
+            break
+        if len(block) > remaining:
+            block = block[:remaining].rsplit(" ", 1)[0].rstrip()
+        blocks.append(block)
+        total += len(block) + (2 if len(blocks) > 1 else 0)
     return "\n\n".join(blocks)
 
 

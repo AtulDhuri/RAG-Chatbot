@@ -462,12 +462,55 @@ def record_chat_query(site_id: str, account_id: str, domain: str, question: str,
             )
 
 
+def _semantic_query_groups(rows: list[tuple]) -> list[dict]:
+    """Group paraphrased questions using OpenAI embedding similarity."""
+    if not rows:
+        return []
+    try:
+        from .vectorstore import embed_texts
+        import math
+
+        embeddings = embed_texts([row[1] for row in rows])
+        groups: list[dict] = []
+        threshold = 0.86
+        for row, embedding in zip(rows, embeddings):
+            length = math.sqrt(sum(value * value for value in embedding)) or 1.0
+            normalized = [value / length for value in embedding]
+            match = None
+            best_score = threshold
+            for group in groups:
+                if group["domain"] != row[0]:
+                    continue
+                score = sum(a * b for a, b in zip(normalized, group["embedding"]))
+                if score >= best_score:
+                    best_score = score
+                    match = group
+            if match is None:
+                groups.append({
+                    "domain": row[0],
+                    "question": row[1],
+                    "times_asked": int(row[2]),
+                    "last_asked": row[3],
+                    "embedding": normalized,
+                })
+            else:
+                match["times_asked"] += int(row[2])
+                if row[3] and (not match["last_asked"] or row[3] > match["last_asked"]):
+                    match["last_asked"] = row[3]
+        for group in groups:
+            group.pop("embedding", None)
+        return sorted(groups, key=lambda item: (item["times_asked"], item["last_asked"] or ""), reverse=True)[:50]
+    except Exception:
+        logger.exception("Semantic question grouping failed; using exact questions")
+        return [{"domain": row[0], "question": row[1], "times_asked": int(row[2]), "last_asked": row[3]} for row in rows[:50]]
+
+
 def usage_summary(account_id: str) -> dict:
     if not using_db():
         raise HTTPException(503, "Plans require the configured PostgreSQL database")
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT p.name,p.chat_limit,s.current_period_start,s.current_period_end "
+            "SELECT p.name,p.chat_limit,s.current_period_start,s.current_period_end,s.status "
             "FROM subscriptions s JOIN plans p ON p.id=s.plan_id "
             "WHERE s.account_id=%s ORDER BY s.updated_at DESC LIMIT 1",
             (account_id,),
@@ -488,9 +531,10 @@ def usage_summary(account_id: str) -> dict:
             "ORDER BY times_asked DESC, last_asked DESC LIMIT 50",
             (account_id,),
         )
-        queries = [{"domain": r[0], "question": r[1], "times_asked": r[2], "last_asked": r[3]} for r in cur.fetchall()]
+        queries = _semantic_query_groups(cur.fetchall())
     return {
         "plan": subscription[0],
+        "status": subscription[4],
         "chat_count": used,
         "chat_limit": subscription[1],
         "remaining": max(subscription[1] - used, 0),
@@ -537,7 +581,19 @@ def promote_faq(account_id: str, site_id: str, question: str, answer: str, *, pi
 
 def admin_sites() -> list[dict]:
     if not using_db():
-        return []
+        with _lock:
+            emails = {value["id"]: email for email, value in _memory["accounts"].items()}
+            return [
+                {
+                    "domain": domain,
+                    "customer_email": emails.get(site["account_id"], ""),
+                    "plan": "No plan",
+                    "subscription_status": "unknown",
+                    "created_at": None,
+                    "active": True,
+                }
+                for domain, site in _memory["sites"].items()
+            ]
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT w.domain,a.email,COALESCE(p.name,s.plan_id,'No plan'),COALESCE(s.status,'none'),w.created_at,w.active "
@@ -554,8 +610,13 @@ def admin_sites() -> list[dict]:
 
 
 def admin_site_account(domain: str) -> str:
+    domain = normalize_domain(domain)
     if not using_db():
-        raise HTTPException(503, "Website administration requires PostgreSQL")
+        with _lock:
+            site = _memory["sites"].get(domain)
+        if not site:
+            raise HTTPException(404, "Website not found")
+        return site["account_id"]
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT account_id FROM websites WHERE domain=%s AND active", (normalize_domain(domain),))
         row = cur.fetchone()

@@ -9,6 +9,13 @@ services:
       # Set the actual value in the Render dashboard (kept secret, never in git).
       - key: OPENAI_API_KEY
         sync: false
+      # Latency tuning for concise, lower-latency answers.
+      - key: CHAT_MAX_TOKENS
+        value: "256"
+      - key: RETRIEVAL_TOP_K
+        value: "3"
+      - key: CONTEXT_MAX_CHARS
+        value: "6000"
     # NOTE: Persistent disks are a PAID Render feature and are not available on
     # the free plan. On free, the ChromaDB index is ephemeral: it is rebuilt by
     # crawling on demand and is wiped on each deploy / instance restart. The app

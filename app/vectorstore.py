@@ -83,6 +83,11 @@ def _embed(texts: list[str]) -> list[list[float]]:
     return embeddings
 
 
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """Create embeddings for application-level semantic matching."""
+    return _embed_batched(texts)
+
+
 def _embed_batched(texts: list[str], batch_size: int = 64) -> list[list[float]]:
     output: list[list[float]] = []
     for i in range(0, len(texts), batch_size):

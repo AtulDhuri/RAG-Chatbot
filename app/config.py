@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     # ---- LLM / Embeddings provider (OpenAI) ----
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o-mini"
-    chat_max_tokens: int = 400
+    # Keep answers concise to reduce model completion latency.
+    chat_max_tokens: int = 256
     openai_embedding_model: str = "text-embedding-3-small"
 
     # ---- Context.dev ----
@@ -25,7 +26,9 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "./data/chroma"
 
     # ---- Retrieval / chunking ----
-    retrieval_top_k: int = 5
+    # Fewer passages reduce embedding/retrieval and prompt latency.
+    retrieval_top_k: int = 3
+    context_max_chars: int = 6000
     chunk_size: int = 800
     chunk_overlap: int = 150
     crawl_max_pages: int = 100
