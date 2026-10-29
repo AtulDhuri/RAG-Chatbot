@@ -17,6 +17,7 @@ slowapi==0.1.9
 redis==5.2.1
 razorpay==1.4.2
 # razorpay 1.4.2 imports the legacy pkg_resources module.
+setuptools==80.9.0
 pytest==8.3.4
 context.dev==2.25.0
 # ---- Postgres / pgvector vector store and subscriptions ----
