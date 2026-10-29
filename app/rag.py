@@ -42,6 +42,7 @@ def _chat(messages: list[dict]) -> str:
         model=_settings.openai_chat_model,
         messages=messages,
         temperature=0.2,
+        max_tokens=_settings.chat_max_tokens,
     )
     return resp.choices[0].message.content or ""
 

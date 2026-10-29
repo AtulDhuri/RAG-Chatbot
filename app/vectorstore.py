@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -20,6 +21,8 @@ _openai = OpenAI(api_key=_settings.openai_api_key)
 _USE_PGVECTOR = _settings.vector_backend.lower() == "pgvector" or (
     _settings.vector_backend.lower() == "auto" and bool(_settings.database_url)
 )
+_PG_SCHEMA_LOCK = threading.Lock()
+_PG_SCHEMA_READY = False
 
 if not _USE_PGVECTOR:
     import chromadb
@@ -49,7 +52,12 @@ def _pg_conn():
     from pgvector.psycopg import register_vector
     conn = psycopg.connect(_settings.database_url, autocommit=False, prepare_threshold=None)
     register_vector(conn)
-    _ensure_pg_schema(conn)
+    global _PG_SCHEMA_READY
+    if not _PG_SCHEMA_READY:
+        with _PG_SCHEMA_LOCK:
+            if not _PG_SCHEMA_READY:
+                _ensure_pg_schema(conn)
+                _PG_SCHEMA_READY = True
     return conn
 
 

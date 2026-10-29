@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # ---- LLM / Embeddings provider (OpenAI) ----
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o-mini"
+    chat_max_tokens: int = 400
     openai_embedding_model: str = "text-embedding-3-small"
 
     # ---- Context.dev ----
