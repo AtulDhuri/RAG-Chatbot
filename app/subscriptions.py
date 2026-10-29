@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, name TEXT NOT NULL, chat_
 CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, plan_id TEXT NOT NULL REFERENCES plans(id), status TEXT NOT NULL, start_date TIMESTAMPTZ, end_date TIMESTAMPTZ, current_period_start TIMESTAMPTZ, current_period_end TIMESTAMPTZ, razorpay_customer_id TEXT UNIQUE, razorpay_subscription_id TEXT UNIQUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS websites (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, domain TEXT NOT NULL UNIQUE, installation_token_hash TEXT NOT NULL UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
-CREATE TABLE IF NOT EXISTS usage (website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, period TEXT NOT NULL, chat_count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (website_id, period));
+CREATE TABLE IF NOT EXISTS chat_queries (id BIGSERIAL PRIMARY KEY, account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, website_id UUID NOT NULL REFERENCES websites(id) ON DELETE CASCADE, domain TEXT NOT NULL, question TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS chat_queries_account_created_idx ON chat_queries(account_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS webhook_events (event_id TEXT PRIMARY KEY, received_at TIMESTAMPTZ NOT NULL DEFAULT now());
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'customer';
 ALTER TABLE plans ADD COLUMN IF NOT EXISTS indexed_page_limit INTEGER NOT NULL DEFAULT 100;
@@ -350,3 +351,70 @@ def razorpay_plan_id(plan_id: str) -> str:
 
 def is_admin(account_id: str) -> bool:
     return _admin_allowed(account_id)
+
+
+def rotate_site_token(account_id: str, domain: str) -> dict:
+    domain = normalize_domain(domain)
+    raw = secrets.token_urlsafe(32)
+    if using_db():
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE websites SET installation_token_hash=%s,updated_at=now() WHERE account_id=%s AND domain=%s RETURNING id", (_token_hash(raw), account_id, domain))
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, "Website not found")
+        return {"domain": domain, "site_id": str(row[0]), "installation_token": raw}
+    with _lock:
+        site = _memory["sites"].get(domain)
+        if not site or site["account_id"] != account_id:
+            raise HTTPException(404, "Website not found")
+        site["token_hash"] = _token_hash(raw)
+        return {"domain": domain, "site_id": site["id"], "installation_token": raw}
+
+
+def record_chat_query(site_id: str, account_id: str, domain: str, question: str) -> None:
+    if account_id == "local":
+        return
+    if using_db():
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO chat_queries(account_id,website_id,domain,question) VALUES (%s,%s,%s,%s)",
+                (account_id, site_id, normalize_domain(domain), question[:2000]),
+            )
+
+
+def usage_summary(account_id: str) -> dict:
+    if not using_db():
+        return {"chat_count": 0, "chat_limit": _settings.starter_chat_limit, "remaining": _settings.starter_chat_limit, "queries": []}
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT p.name,p.chat_limit,s.current_period_start,s.current_period_end "
+            "FROM subscriptions s JOIN plans p ON p.id=s.plan_id "
+            "WHERE s.account_id=%s ORDER BY s.updated_at DESC LIMIT 1",
+            (account_id,),
+        )
+        subscription = cur.fetchone()
+        if not subscription:
+            raise HTTPException(404, "Subscription not found")
+        period = subscription[2].isoformat() if subscription[2] else _period()
+        cur.execute(
+            "SELECT COALESCE(SUM(chat_count),0) FROM usage u "
+            "JOIN websites w ON w.id=u.website_id WHERE w.account_id=%s AND u.period=%s",
+            (account_id, period),
+        )
+        used = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT domain, question, COUNT(*) AS times_asked, MAX(created_at) AS last_asked "
+            "FROM chat_queries WHERE account_id=%s GROUP BY domain, question "
+            "ORDER BY times_asked DESC, last_asked DESC LIMIT 50",
+            (account_id,),
+        )
+        queries = [{"domain": r[0], "question": r[1], "times_asked": r[2], "last_asked": r[3]} for r in cur.fetchall()]
+    return {
+        "plan": subscription[0],
+        "chat_count": used,
+        "chat_limit": subscription[1],
+        "remaining": max(subscription[1] - used, 0),
+        "period_start": subscription[2],
+        "period_end": subscription[3],
+        "queries": queries,
+    }

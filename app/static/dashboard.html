@@ -26,9 +26,10 @@
     <p id="account"></p>
     <p>Starter plan: 500 chatbot answers per billing period.</p>
     <button id="subscribe">Subscribe with Razorpay</button><button class="secondary" id="logout">Log out</button>
+    <h2>Usage</h2><div id="usage">Loading usage...</div>
     <h2>Connect a website</h2>
     <form id="site-form"><input id="domain" placeholder="https://example.com" required><button type="submit">Create installation token</button></form>
-    <div id="site-result"></div>
+    <div id="site-result"></div><hr><h2>Recover a lost token</h2><form id="rotate-form"><input id="rotate-domain" placeholder="example.com" required><button type="submit">Generate new installation token</button></form>
   </section>
   <p class="status" id="status"></p>
 </main>
@@ -52,8 +53,12 @@
   };
   document.getElementById('logout').onclick=function(){request('/api/auth/logout',{method:'POST'}).then(function(){show('Logged out.');refresh();});};
   document.getElementById('site-form').onsubmit=function(e){e.preventDefault();var requestedDomain=document.getElementById('domain').value;request('/api/sites',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({domain:requestedDomain})}).then(function(d){var result=document.getElementById('site-result');result.innerHTML='<p>Copy this installation snippet into the registered website:</p><div class="token"></div><p>Keep the installation token private.</p>';result.querySelector('.token').textContent='<scr'+'ipt src="'+api+'/widget.js" data-domain="'+d.domain+'" data-installation-token="'+d.installation_token+'" defer></scr'+'ipt>';}).catch(function(e){show(e.message,true);});};
+function loadUsage(){request('/api/usage').then(function(u){var rows=(u.queries||[]).map(function(q){return '<li><b>'+q.times_asked+'x</b> '+escapeHtml(q.question)+' <small>('+escapeHtml(q.domain)+')</small></li>';}).join('');document.getElementById('usage').innerHTML='<p><b>'+u.chat_count+' / '+u.chat_limit+'</b> chats used. '+u.remaining+' remaining.</p><p>Most asked queries:</p><ol>'+ (rows||'<li>No chat queries yet.</li>') +'</ol>';}).catch(function(e){document.getElementById('usage').textContent=e.message;});}function escapeHtml(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+
   var selectedPlan=new URLSearchParams(location.search).get('plan_id')||'starter';
+  loadUsage();
   document.getElementById('subscribe').textContent='Subscribe to '+selectedPlan;
+  document.getElementById('rotate-form').onsubmit=function(e){e.preventDefault();var d=document.getElementById('rotate-domain').value;request('/api/sites/'+encodeURIComponent(d)+'/rotate-token',{method:'POST'}).then(function(result){document.getElementById('site-result').innerHTML='<p>New installation snippet. The old token no longer works.</p><div class="token"></div>';document.querySelector('.token').textContent='<scr'+'ipt src="'+api+'/widget.js" data-domain="'+result.domain+'" data-installation-token="'+result.installation_token+'" defer></scr'+'ipt>';}).catch(function(e){show(e.message,true);});};
   document.getElementById('subscribe').onclick=function(){request('/api/billing/create-subscription?plan_id='+encodeURIComponent(selectedPlan),{method:'POST'}).then(function(d){var checkout=new Razorpay({key:d.key_id,subscription_id:d.subscription_id,name:'Website Chatbot',description:selectedPlan+' chatbot subscription',handler:function(response){request('/api/billing/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(response)}).then(function(){show('Payment verified. Subscription activated.');}).catch(function(e){show(e.message,true);});},modal:{ondismiss:function(){show('Payment window closed.');}}});checkout.open();}).catch(function(e){show(e.message,true);});};
   refresh();
 })();

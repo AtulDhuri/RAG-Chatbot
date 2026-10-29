@@ -123,6 +123,11 @@ def plans():
     return subscriptions.list_plans()
 
 
+@app.get("/api/usage")
+def usage(request: Request):
+    return subscriptions.usage_summary(subscriptions.account_for_request(request))
+
+
 @app.get("/api/admin/me")
 def admin_me(request: Request):
     account_id = subscriptions.account_for_request(request)
@@ -298,6 +303,12 @@ def create_site(request: Request, req: SiteRequest):
     return subscriptions.create_site(account_id, req.domain)
 
 
+@app.post("/api/sites/{domain:path}/rotate-token", response_model=SiteResponse)
+def rotate_site_token(request: Request, domain: str):
+    account_id = subscriptions.account_for_request(request)
+    return subscriptions.rotate_site_token(account_id, domain)
+
+
 @app.post("/api/register", response_model=RegisterResponse)
 def register(request: Request, req: RegisterRequest):
     domain = normalize_domain(req.domain)
@@ -351,6 +362,7 @@ def chat(request: Request, req: ChatRequest):
 
     # Reserve one quota unit only for a request that will call the RAG/LLM path.
     subscriptions.enforce_chat_quota(site_id, account_id, domain)
+    subscriptions.record_chat_query(site_id, account_id, domain, req.message)
     result = rag.answer(domain, req.message)
     status = "indexing" if indexer.is_indexing(domain) else "ready"
     return ChatResponse(
