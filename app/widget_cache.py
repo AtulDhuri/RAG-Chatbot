@@ -31,23 +31,26 @@ def _not_allowed(request, chatbot_id, event, reason, domain):
     reject(request,chatbot_id,event,reason,domain)
 
 def validate(request, chatbot_id: str, current_domain: str):
+    """Authorize a chatbot only when its ID and page hostname match in PostgreSQL."""
     domain=normalize_domain(current_domain)
     if not domain or not _registered_origin(domain, request.headers.get('origin')):
         _not_allowed(request,chatbot_id,'invalid_domain','origin mismatch',domain)
     referer=request.headers.get('referer')
     if referer and not _registered_origin(domain,referer): _not_allowed(request,chatbot_id,'invalid_referer','referer mismatch',domain)
+
+    # Always perform the authoritative ID-to-domain lookup. Do not trust a
+    # process-local cache for tenant identity: a copied script must fail when
+    # it is embedded on a different domain, even during cache transitions.
+    bot=db.get_chatbot_by_domain(domain)
+    if not bot or bot['id'] != chatbot_id:
+        _not_allowed(request,chatbot_id,'invalid_domain','chatbot/domain mismatch',domain)
+
+    from .security import validate_chatbot
+    validate_chatbot(request,chatbot_id)
+    entry=_cache_entry({'chatbot_id':bot['id'],'status':bot['status'],'subscription_status':'active','knowledge_status':bot.get('knowledge_status'),'expires_at':bot['subscription_end_date']})
+    with _lock: _entries[domain]=entry
+
     now=datetime.now(timezone.utc)
-    with _lock: entry=dict(_entries.get(domain,{}))
-    if entry and time.monotonic()-entry.get('cached_at',0)>get_settings().widget_validation_cache_ttl_seconds:
-        invalidate(domain=domain); entry={}
-    if not entry or entry.get('chatbot_id')!=chatbot_id or entry.get('status')!='active':
-        bot=db.get_chatbot_by_domain(domain)
-        if not bot: _not_allowed(request,chatbot_id,'invalid_domain','domain not registered',domain)
-        # Full authoritative check on cache miss, including subscription dates.
-        from .security import validate_chatbot
-        validate_chatbot(request,bot['id'])
-        entry=_cache_entry({'chatbot_id':bot['id'],'status':bot['status'],'subscription_status':'active','knowledge_status':bot.get('knowledge_status'),'expires_at':bot['subscription_end_date']})
-        with _lock: _entries[domain]=entry
     try: end=datetime.fromisoformat(entry['expires_at']); end=end if end.tzinfo else end.replace(tzinfo=timezone.utc)
     except (TypeError,ValueError): _not_allowed(request,chatbot_id,'expired_subscription','invalid expiry',domain)
     if entry.get('knowledge_status')!='ready':
