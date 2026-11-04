@@ -176,6 +176,8 @@ def chatbot_js():return FileResponse(STATIC_DIR/'widget.js',media_type='applicat
 def widget_js():return FileResponse(STATIC_DIR/'widget.js',media_type='application/javascript',headers={'Cache-Control':'no-cache, must-revalidate'})
 @app.get('/demo')
 def demo():return FileResponse(STATIC_DIR/'demo.html',media_type='text/html')
+@app.get('/local-preview')
+def local_preview():return FileResponse(STATIC_DIR/'local-preview.html',media_type='text/html')
 @app.get('/')
 def root():return FileResponse(STATIC_DIR/'index.html',media_type='text/html')
 @app.get('/api')
