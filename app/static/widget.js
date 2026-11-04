@@ -70,10 +70,11 @@
   .ragc-sources a{color:${ACCENT};text-decoration:none;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ragc-typing{align-self:flex-start;color:#6b7280;font-size:13px;font-style:italic}
   .ragc-footer{display:flex;border-top:1px solid #e5e7eb;background:#fff;padding:10px}
-  .ragc-input{flex:1;border:1px solid #d1d5db;border-radius:8px;padding:9px 11px;font-size:14px;outline:none}
-  .ragc-input:focus{border-color:${ACCENT}}
-  .ragc-send{margin-left:8px;background:${ACCENT};color:#fff;border:none;border-radius:8px;padding:0 14px;
-    cursor:pointer;font-size:14px}
+  .ragc-input{flex:1;min-width:0;border:1px solid #d1d5db;border-radius:8px;padding:9px 11px;font-size:14px;line-height:1.4;outline:none;color:#111827;background:#fff;caret-color:#111827;appearance:none;-webkit-text-fill-color:#111827}
+  .ragc-input::placeholder{color:#6b7280;opacity:1}
+  .ragc-input:focus{border-color:${ACCENT};box-shadow:0 0 0 2px ${ACCENT}33}
+  .ragc-send{margin-left:8px;background:${ACCENT};color:#fff;border:none;border-radius:8px;padding:0 14px;cursor:pointer;font-size:14px;line-height:1;appearance:none}
+  .ragc-send:hover{filter:brightness(.94)}
   .ragc-send:disabled{opacity:.5;cursor:not-allowed}
   `;
   var styleEl = document.createElement("style");

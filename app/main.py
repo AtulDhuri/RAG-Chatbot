@@ -171,9 +171,9 @@ def logs(chatbot_id:str='',event_type:str='',limit:int=Query(50,ge=1,le=200),off
 def export_csv():
     result=db.list_chatbots(limit=100000); output=io.StringIO(); fields=list(result['items'][0].keys()) if result['items'] else ['id','chatbot_name','allowed_domain','status']; writer=csv.DictWriter(output,fieldnames=fields); writer.writeheader(); writer.writerows([dict(row) for row in result['items']]); return StreamingResponse(iter([output.getvalue()]),media_type='text/csv',headers={'Content-Disposition':'attachment; filename=chatbots.csv'})
 @app.get('/chatbot.js')
-def chatbot_js():return FileResponse(STATIC_DIR/'widget.js',media_type='application/javascript',headers={'Cache-Control':'public,max-age=300'})
+def chatbot_js():return FileResponse(STATIC_DIR/'widget.js',media_type='application/javascript',headers={'Cache-Control':'no-cache, must-revalidate'})
 @app.get('/widget.js')
-def widget_js():return FileResponse(STATIC_DIR/'widget.js',media_type='application/javascript',headers={'Cache-Control':'public,max-age=300'})
+def widget_js():return FileResponse(STATIC_DIR/'widget.js',media_type='application/javascript',headers={'Cache-Control':'no-cache, must-revalidate'})
 @app.get('/demo')
 def demo():return FileResponse(STATIC_DIR/'demo.html',media_type='text/html')
 @app.get('/')
