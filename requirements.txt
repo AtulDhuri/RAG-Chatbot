@@ -4,14 +4,11 @@ httpx==0.28.1
 beautifulsoup4==4.12.3
 lxml==5.3.0
 playwright==1.49.1
-chromadb==0.5.23
-# chromadb 0.5.23's telemetry calls posthog.capture() with the old positional
-# signature; posthog>=3.11 changed it, which spams "capture() takes 1
-# positional argument" errors. Pin to a compatible release.
-posthog==3.7.0
 openai==1.59.6
 pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 slowapi==0.1.9
 tenacity==9.0.0
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.3

@@ -1,20 +1,15 @@
 /*!
  * RAG Website Chatbot — embeddable widget
  *
- * Usage: <script src="https://your-host/widget.js" defer></script>
+ * Usage: <script src="https://your-host/widget.js" data-chatbot-id="CHATBOT_ID" defer></script>
  *
- * The widget reads the host page's domain straight from the address bar
- * (window.location), registers it with the backend (which crawls + indexes
- * the site on first use), and answers visitor questions from that site.
- *
- * Optional override for local testing: add data-domain="example.com" to the
- * <script> tag to point the widget at a different site.
+ * The chatbot ID identifies a server-side chatbot. The host page's Origin and
+ * Referer are validated by the backend; no domain or API key is trusted from JS.
  */
 (function () {
   "use strict";
 
   if (window.__ragChatbotLoaded) return; // guard against double-inject
-  window.__ragChatbotLoaded = true;
 
   // ---- Resolve the backend base URL from this script's own src ----
   var current =
@@ -30,32 +25,17 @@
     API_BASE = "";
   }
 
-  // ---- Read the domain from the address bar (host + port) ----
-  // e.g. "localhost:3000", "www.example.com" -> "example.com"
-  function detectDomain() {
-    var override = (current.getAttribute("data-domain") || "").trim();
-    if (override) return normalizeDomain(override);
-    var host = (window.location.hostname || "").replace(/^www\./, "");
-    var port = window.location.port;
-    // Keep the port only for local/dev origins; public sites use default ports.
-    if (port && (host === "localhost" || /^\d+\.\d+\.\d+\.\d+$/.test(host))) {
-      return host + ":" + port;
-    }
-    return host;
-  }
-
-  function normalizeDomain(raw) {
-    raw = (raw || "").trim().toLowerCase();
-    raw = raw.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    return raw.replace(/^www\./, "");
-  }
-
-  var DOMAIN = detectDomain();
+  // The opaque public chatbot id is the only tenant identifier in the embed code.
+  // The browser supplies Origin and Referer automatically; the widget never sends a domain.
+  var CHATBOT_ID = (current.getAttribute("data-chatbot-id") || "").trim();
+  if (!CHATBOT_ID) return;
   var TITLE = (current.getAttribute("data-title") || "Ask about this site").trim();
   var ACCENT = (current.getAttribute("data-accent") || "#2563eb").trim();
-
-  var registered = false;
+  var sessionToken = null;
+  var initialized = false;
   var greeted = false;
+
+  function startWidget() {
 
   // ------------------------- styles -------------------------
   var css = `
@@ -134,11 +114,7 @@
   var statusEl = panel.querySelector(".ragc-status");
   var statusText = panel.querySelector(".ragc-status-text");
 
-  // Kick off indexing as soon as the widget loads, so the site is being read
-  // before the visitor even opens the chat. Then poll for progress so the user
-  // can see whether the site is still being read or ready to answer.
-  registerDomain();
-  pollStatus();
+  // Authenticate once. Crawling is an admin operation and never starts from this page load.
 
   // ------------------------- behavior -------------------------
   launcher.addEventListener("click", togglePanel);
@@ -148,27 +124,33 @@
     if (e.key === "Enter") send();
   });
 
+  // The widget only checks readiness. It never starts or retries a crawl.
+  initialize().then(function () { pollStatus(); }).catch(function () { /* generic status already shown */ });
+
   function togglePanel() {
     var open = panel.classList.toggle("ragc-open");
     if (open) {
       input.focus();
       if (!greeted) {
         greeted = true;
-        addBot("Hi! Ask me anything about " + DOMAIN + ".");
+        addBot("Hi! Ask me anything about this site.");
       }
     }
   }
 
-  function registerDomain() {
-    if (registered || !API_BASE || !DOMAIN) return;
-    registered = true;
-    fetch(API_BASE + "/api/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain: DOMAIN }),
-    }).catch(function () {
-      /* non-fatal: chat will register on demand too */
-    });
+  function initialize() {
+    if (initialized || !API_BASE || !CHATBOT_ID) return Promise.reject(new Error("unavailable"));
+    initialized = true;
+    return fetch(API_BASE + "/api/chat/init", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatbot_id: CHATBOT_ID })
+    }).then(function (r) { if (!r.ok) throw new Error("unavailable"); return r.json(); })
+      .then(function (data) { sessionToken = data.sessionToken; return data; })
+      .catch(function (err) { initialized = false; setStatus("Chatbot unavailable", "error"); throw err; });
+  }
+
+  function authorizedHeaders() {
+    return { "Content-Type": "application/json", "Authorization": "Bearer " + (sessionToken || "") };
   }
 
   // Show a status line: "state" is "busy" | "ready" | "error".
@@ -182,82 +164,41 @@
       (state === "busy" ? " ragc-busy" : "");
   }
 
-  var statusTimer = null;
-
-  // Poll /api/status so the user can see whether the site is still being read
-  // or is ready to answer. Stops once indexing is done.
+  // Readiness check only. This endpoint never starts a crawl.
   function pollStatus() {
-    if (!API_BASE || !DOMAIN) return;
-    if (statusTimer) clearTimeout(statusTimer);
-
-    function tick() {
-      fetch(API_BASE + "/api/status?domain=" + encodeURIComponent(DOMAIN))
-        .then(function (r) { return r.json(); })
-        .then(function (s) {
-          if (!s) return;
-          if (s.phase === "ready" || s.indexed) {
-            setStatus("Ready to answer", "ready");
-            // Briefly show "ready", then hide so it doesn't take up space.
-            statusTimer = setTimeout(function () {
-              if (statusEl) statusEl.classList.add("ragc-hidden");
-            }, 2500);
-            return; // stop polling
-          }
-          if (s.phase === "error") {
-            setStatus("Had trouble reading the site", "error");
-            return; // stop polling
-          }
-          if (s.phase === "embedding") {
-            setStatus("Processing content (" + s.pages_done + " pages)...", "busy");
-          } else {
-            var seen = s.pages_known > 0
-              ? s.pages_done + "/" + s.pages_known
-              : String(s.pages_done || 0);
-            setStatus("Reading the site - " + seen + " pages...", "busy");
-          }
-          statusTimer = setTimeout(tick, 1500);
-        })
-        .catch(function () {
-          statusTimer = setTimeout(tick, 3000);
-        });
-    }
-
-    tick();
+    if (!API_BASE || !CHATBOT_ID || !sessionToken) return;
+    fetch(API_BASE + "/api/status", { headers: authorizedHeaders() })
+      .then(function (r) { if (r.status === 403) throw new Error("unavailable"); return r.json(); })
+      .then(function (s) {
+        if (s && (s.phase === "ready" || s.indexed)) {
+          setStatus("Ready to answer", "ready");
+        } else {
+          setStatus("Knowledge base is being prepared by the site administrator", "busy");
+        }
+      })
+      .catch(function () { setStatus("Chatbot unavailable", "error"); });
   }
 
   function send() {
-    var text = input.value.trim();
-    if (!text) return;
-    input.value = "";
-    addUser(text);
-    setBusy(true);
-    var typing = addTyping();
-
-    fetch(API_BASE + "/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain: DOMAIN, message: text }),
-    })
-      .then(function (r) {
-        if (r.status === 429) throw new Error("rate");
-        return r.json();
-      })
-      .then(function (data) {
+    var text=input.value.trim(); if(!text)return;
+    input.value=""; addUser(text); setBusy(true); var typing=addTyping();
+    fetch(API_BASE+"/api/chat/stream",{method:"POST",headers:authorizedHeaders(),body:JSON.stringify({message:text})})
+      .then(function(r){if(r.status===429)throw new Error("rate");if(!r.ok)throw new Error("unavailable");return r.body.getReader();})
+      .then(function(reader){
         typing.remove();
-        addBot(data.answer || "Sorry, I couldn't come up with an answer.", data.sources);
+        var decoder=new TextDecoder(),buffer="",botEl=document.createElement("div"),sources=[];
+        botEl.className="ragc-msg ragc-bot"; body.appendChild(botEl);
+        function consume(){return reader.read().then(function(part){
+          buffer+=decoder.decode(part.value||new Uint8Array(),{stream:!part.done});
+          var blocks=buffer.split("\\n\\n"); buffer=blocks.pop();
+          blocks.forEach(function(block){var line=block.split("\\n").filter(function(x){return x.indexOf("data: ")===0;})[0];if(!line)return;var raw=line.slice(6);if(raw==="[DONE]")return;try{var event=JSON.parse(raw);if(event.type==="token"){botEl.appendChild(document.createTextNode(event.text));scroll();}if(event.type==="final")sources=event.sources||[];}catch(e){}});
+          if(part.done){if(sources.length){var box=document.createElement("div");box.className="ragc-sources";box.appendChild(document.createTextNode("Sources:"));sources.slice(0,3).forEach(function(u){var a=document.createElement("a");a.href=u;a.target="_blank";a.rel="noopener noreferrer";a.textContent=u;box.appendChild(a);});botEl.appendChild(box);}return;}
+          return consume();
+        });}
+        return consume();
       })
-      .catch(function (err) {
-        typing.remove();
-        if (err && err.message === "rate") {
-          addBot("You're sending messages too quickly. Please wait a moment.");
-        } else {
-          addBot("Something went wrong reaching the assistant. Please try again.");
-        }
-      })
-      .finally(function () {
-        setBusy(false);
-        input.focus();
-      });
+      .catch(function(err){typing.remove();if(err.message==="rate")addBot("You're sending messages too quickly. Please wait a moment.");else addBot("Something went wrong reaching the assistant. Please try again.");})
+      .finally(function(){setBusy(false);input.focus();});
   }
 
   function setBusy(b) {
@@ -313,4 +254,22 @@
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
+
+  }
+
+  var currentDomain = (window.location.hostname || "").toLowerCase().replace(/^www\./, "");
+  fetch(API_BASE + "/api/widget/validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chatbot_id: CHATBOT_ID, current_domain: currentDomain, widget_version: "1.0.0" })
+  }).then(function (response) {
+    if (!response.ok) throw new Error("unavailable");
+    return response.json();
+  }).then(function (result) {
+    if (!result || result.success !== true) return;
+    window.__ragChatbotLoaded = true;
+    startWidget();
+  }).catch(function () {
+    // Do not create any DOM when the domain is not authorized or is unavailable.
+  });
 })();

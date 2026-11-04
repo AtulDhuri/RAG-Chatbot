@@ -7,9 +7,13 @@ services:
     # The container listens on $PORT, which Render injects automatically.
     envVars:
       # Set the actual value in the Render dashboard (kept secret, never in git).
-      - key: OPENAI_API_KEY
+      - key: DATABASE_URL
         sync: false
-    # NOTE: Persistent disks are a PAID Render feature and are not available on
+      - key: JWT_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+    # Supabase PostgreSQL stores metadata and pgvector embeddings.
     # the free plan. On free, the ChromaDB index is ephemeral: it is rebuilt by
     # crawling on demand and is wiped on each deploy / instance restart. The app
     # handles this gracefully (it re-crawls when content is missing).
