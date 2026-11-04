@@ -1,6 +1,6 @@
 """PostgreSQL repository for chatbot administration, knowledge, and vector metadata."""
 from __future__ import annotations
-import hashlib, secrets
+import hashlib, secrets, time
 from datetime import datetime, timezone
 from contextlib import contextmanager
 from psycopg.rows import dict_row
@@ -55,9 +55,19 @@ def connection():
 
 
 def init_db() -> None:
-    with _get_pool().connection() as c:
-        with c.transaction():
-            for statement in SCHEMA_STATEMENTS: c.execute(statement)
+    """Run schema creation once at a time across Render instances/workers."""
+    for attempt in range(3):
+        try:
+            with _get_pool().connection() as c:
+                with c.transaction():
+                    c.execute("SELECT pg_advisory_xact_lock(836421907)")
+                    for statement in SCHEMA_STATEMENTS:
+                        c.execute(statement)
+            return
+        except Exception as exc:
+            if "deadlock detected" not in str(exc).lower() or attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
 
 def get_chatbot(chatbot_id):
     with _get_pool().connection() as c: return c.execute('SELECT * FROM chatbots WHERE id=%s',(chatbot_id,)).fetchone()
