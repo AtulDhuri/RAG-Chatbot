@@ -190,8 +190,8 @@
         botEl.className="ragc-msg ragc-bot"; body.appendChild(botEl);
         function consume(){return reader.read().then(function(part){
           buffer+=decoder.decode(part.value||new Uint8Array(),{stream:!part.done});
-          var blocks=buffer.split("\\n\\n"); buffer=blocks.pop();
-          blocks.forEach(function(block){var line=block.split("\\n").filter(function(x){return x.indexOf("data: ")===0;})[0];if(!line)return;var raw=line.slice(6);if(raw==="[DONE]")return;try{var event=JSON.parse(raw);if(event.type==="token"){botEl.appendChild(document.createTextNode(event.text));scroll();}if(event.type==="final")sources=event.sources||[];}catch(e){}});
+          var blocks=buffer.split("\n\n"); buffer=blocks.pop();
+          blocks.forEach(function(block){var line=block.split("\n").filter(function(x){return x.indexOf("data: ")===0;})[0];if(!line)return;var raw=line.slice(6);if(raw==="[DONE]")return;try{var event=JSON.parse(raw);if(event.type==="token"){botEl.appendChild(document.createTextNode(event.text));scroll();}if(event.type==="final")sources=event.sources||[];}catch(e){}});
           if(part.done){if(sources.length){var box=document.createElement("div");box.className="ragc-sources";box.appendChild(document.createTextNode("Sources:"));sources.slice(0,3).forEach(function(u){var a=document.createElement("a");a.href=u;a.target="_blank";a.rel="noopener noreferrer";a.textContent=u;box.appendChild(a);});botEl.appendChild(box);}return;}
           return consume();
         });}
