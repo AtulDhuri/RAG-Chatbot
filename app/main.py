@@ -22,7 +22,8 @@ settings=get_settings(); limiter=Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(application):
-    db.init_db()
+    # Schema migrations run in Render's preDeployCommand, not in every web
+    # process. Keeping startup read-only avoids DDL deadlocks during deploys.
     start_subscription_sync()
     yield
     db.close_pool()

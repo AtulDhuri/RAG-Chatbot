@@ -4,6 +4,11 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    # Run schema migrations once before the new web process starts. Do not run
+    # DDL from the application lifespan because overlapping web instances can
+    # deadlock while acquiring PostgreSQL relation locks.
+    preDeployCommand: python -m app.migrate
+    healthCheckPath: /health
     # The container listens on $PORT, which Render injects automatically.
     envVars:
       # Set the actual value in the Render dashboard (kept secret, never in git).

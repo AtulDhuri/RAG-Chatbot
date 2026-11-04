@@ -55,8 +55,8 @@ def connection():
 
 
 def init_db() -> None:
-    """Run schema creation once at a time across Render instances/workers."""
-    for attempt in range(3):
+    """Run schema creation with retries for transient PostgreSQL deadlocks."""
+    for attempt in range(5):
         try:
             with _get_pool().connection() as c:
                 with c.transaction():
@@ -65,7 +65,10 @@ def init_db() -> None:
                         c.execute(statement)
             return
         except Exception as exc:
-            if "deadlock detected" not in str(exc).lower() or attempt == 2:
+            # SQLSTATE 40P01 is the stable PostgreSQL signal. Keep the text
+            # check for pooler/driver wrappers that do not expose sqlstate.
+            is_deadlock = getattr(exc, "sqlstate", None) == "40P01" or "deadlock detected" in str(exc).lower()
+            if not is_deadlock or attempt == 4:
                 raise
             time.sleep(2 ** attempt)
 
