@@ -106,6 +106,28 @@
         cursor: pointer;
       }
       .composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+      @media (max-width: 600px) {
+        body { align-items: flex-start; padding: 12px; }
+        .card { min-height: calc(100vh - 24px); border-radius: 12px; }
+        header { padding: 16px; }
+        .setup { flex-direction: column; padding: 16px; }
+        .setup button { min-height: 44px; padding: 0 18px; }
+        .status { padding: 10px 16px; }
+        .chat { height: calc(100vh - 190px); min-height: 360px; }
+        .messages { padding: 16px; }
+        .msg { max-width: 92%; overflow-wrap: anywhere; }
+        .composer { gap: 8px; padding: 10px 16px max(10px, env(safe-area-inset-bottom)); }
+        .composer button { min-width: 70px; min-height: 44px; }
+      }
+
+      @media (max-width: 380px) {
+        body { padding: 0; }
+        .card { min-height: 100vh; border-radius: 0; }
+        .chat { height: calc(100vh - 190px); }
+        .setup { padding: 14px; }
+        .messages { padding: 14px; }
+      }
     </style>
   </head>
   <body>
