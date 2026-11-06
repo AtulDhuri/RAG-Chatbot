@@ -306,7 +306,7 @@ def _expand_navigation(page, url: str, root: str) -> set[str]:
     return before
 
 
-def crawl_domain(domain: str, *, max_pages: int, timeout: int, respect_robots: bool, progress_cb: Optional[ProgressCallback] = None, render_javascript: bool = True, network_idle_timeout: int = 30, post_render_delay: int = 5, return_result: bool = False):
+def crawl_domain(domain: str, *, max_pages: int | None = None, timeout: int, respect_robots: bool, progress_cb: Optional[ProgressCallback] = None, render_javascript: bool = True, network_idle_timeout: int = 30, post_render_delay: int = 5, return_result: bool = False):
     target = parse_target(domain)
     if not target.host: return CrawlResult([], CrawlMetrics()) if return_result else []
     _assert_safe_host(target.host)
@@ -346,7 +346,7 @@ def crawl_domain(domain: str, *, max_pages: int, timeout: int, respect_robots: b
                     root = _authority(start)
                     queue.append(start); discovered.add(start)
                 seen: set[str] = set()
-                while queue and len(pages) < max_pages:
+                while queue and (max_pages is None or max_pages <= 0 or len(pages) < max_pages):
                     url = queue.popleft()
                     url = _normalize_url(url, start or reachable)
                     if not url or url in seen: continue
@@ -381,7 +381,7 @@ def crawl_domain(domain: str, *, max_pages: int, timeout: int, respect_robots: b
                     metrics.total_pages_crawled += 1
                     metrics.crawl_coverage_percent = round(metrics.total_pages_crawled / max(1, len(discovered)) * 100, 2)
                     if progress_cb:
-                        try: progress_cb(metrics.total_pages_crawled, min(len(discovered), max_pages), url)
+                        try: progress_cb(metrics.total_pages_crawled, len(discovered), url)
                         except Exception: logger.debug("progress callback failed", exc_info=True)
                 if len(discovered) < 3:
                     for route in _COMMON_ROUTES:
@@ -391,7 +391,7 @@ def crawl_domain(domain: str, *, max_pages: int, timeout: int, respect_robots: b
                                 response = client.get(candidate, timeout=10, follow_redirects=True)
                                 if response.status_code < 400: discovered.add(candidate); queue.append(candidate)
                             except Exception: pass
-                    while queue and len(pages) < max_pages:
+                    while queue and (max_pages is None or max_pages <= 0 or len(pages) < max_pages):
                         url = queue.popleft()
                         if url in seen: continue
                         seen.add(url)

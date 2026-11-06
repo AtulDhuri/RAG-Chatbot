@@ -69,15 +69,21 @@ class PgVectorStore(VectorStore):
         stamp=db.now()
         with db.connection() as conn:
             with conn.transaction():
-                conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version=%s", (chatbot_id, version))
                 for doc in documents:
                     if doc.get("embedding") is None:
                         conn.execute("""INSERT INTO chatbot_documents (id,chatbot_id,source_url,title,content,embedding,content_hash,knowledge_version,created_at,updated_at)
                             SELECT id,chatbot_id,source_url,title,%s,embedding,%s,%s,created_at,%s FROM chatbot_documents
-                            WHERE chatbot_id=%s AND knowledge_version=%s AND id=%s""", (doc["content"],doc["content_hash"],version,stamp,chatbot_id,previous_version,doc["id"]))
+                            WHERE chatbot_id=%s AND knowledge_version=%s AND id=%s
+                            ON CONFLICT (id, knowledge_version) DO UPDATE SET content=EXCLUDED.content, content_hash=EXCLUDED.content_hash, updated_at=EXCLUDED.updated_at""", (doc["content"],doc["content_hash"],version,stamp,chatbot_id,previous_version,doc["id"]))
                     else:
                         self._insert(conn,chatbot_id,[dict(doc,created_at=stamp,updated_at=stamp)],version)
-                conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version<>%s",(chatbot_id,version))
+
+    def publish_version(self, chatbot_id, version, previous_version):
+        from . import db
+        with db.connection() as conn:
+            with conn.transaction():
+                conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version NOT IN (%s,%s)",(chatbot_id,version,previous_version))
+                conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version=%s",(chatbot_id,previous_version))
 
     def similarity_search(self, chatbot_id, embedding, top_k):
         from . import db

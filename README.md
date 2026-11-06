@@ -73,3 +73,17 @@ CONTEXT_DEV_TIMEOUT=300
 ```
 
 Context.dev returns page content as Markdown and page metadata. Its scrape API supports JavaScript rendering and managed retries/proxies. See the [Context.dev scrape documentation](https://branddev.mintlify.app/guides/scrape-websites-to-markdown) and [authentication guide](https://branddev.mintlify.app/guides/get-started/authentication).
+
+## Large-site crawling
+
+The recommended large-site configuration uses the local Playwright crawler:
+
+```env
+CRAWL_BACKEND=playwright
+CRAWL_MAX_PAGES=0
+EMBEDDING_BATCH_SIZE=64
+```
+
+`CRAWL_MAX_PAGES=0` means the crawler follows the complete same-domain frontier discovered from sitemaps and page links. It does not stop after 50 or 100 pages. Embeddings are submitted in bounded batches so a large crawl does not become one embedding request. Keep robots protection enabled and review crawl scope before indexing a very large domain. The hosted Context.dev backend remains available, but its crawl endpoint has provider-side page limits, so it is not the unbounded backend.
+
+Large-site ingestion is checkpointed in PostgreSQL. Extracted pages are stored as an ingestion run, embeddings are generated in bounded page batches, and each completed batch is marked done. If the worker restarts during embedding, the next indexing request resumes the unfinished run. A new vector version is exposed only after all batches complete; users continue querying the previous ready version during ingestion.

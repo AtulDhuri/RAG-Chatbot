@@ -9,7 +9,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
-    crawl_max_pages: int = 100
+    # 0 means crawl until the domain frontier is exhausted.
+    crawl_backend: str = "auto"
+    crawl_max_pages: int = 0
     crawl_ttl_seconds: int = 86400
     crawl_respect_robots: bool = True
     crawl_timeout: int = 60
@@ -19,14 +21,16 @@ class Settings(BaseSettings):
     crawl_cache_ttl_seconds: int = 86400
     context_dev_api_key: str = ""
     context_dev_base_url: str = "https://api.context.dev/v1"
-    context_dev_max_pages: int = 100
-    context_dev_analysis_max_links: int = 50
+    context_dev_max_pages: int = 0
+    context_dev_analysis_max_links: int = 0
     context_dev_analysis_url_regex: str = ""
     context_dev_timeout: int = 300
     database_url: str
     embedding_dim: int = 1536
     vector_provider: str = "pgvector"
     public_base_url: str = ""
+    embedding_batch_size: int = 64
+    ingestion_page_batch_size: int = 32
     retrieval_top_k: int = 5
     chunk_size: int = 800
     chunk_overlap: int = 150

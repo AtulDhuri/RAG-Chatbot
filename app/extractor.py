@@ -69,7 +69,9 @@ class ContextDevExtractor(WebsiteKnowledgeExtractor):
     def analyze_website(self, url: str) -> WebsiteAnalysisResult:
         if not self.api_key: raise RuntimeError("CONTEXT_DEV_API_KEY is not configured")
         parsed = self._validate(url)
-        params = {"domain": parsed.netloc, "maxLinks": self.analysis_max_links}
+        params = {"domain": parsed.netloc}
+        if self.analysis_max_links > 0:
+            params["maxLinks"] = self.analysis_max_links
         if self.analysis_url_regex:
             params["urlRegex"] = self.analysis_url_regex
         response = self._request("GET", f"{self.base_url}/web/urls", params=params)
@@ -82,7 +84,11 @@ class ContextDevExtractor(WebsiteKnowledgeExtractor):
     def extract_knowledge(self, url: str) -> KnowledgeExtractionResult:
         if not self.api_key: raise RuntimeError("CONTEXT_DEV_API_KEY is not configured")
         self._validate(url)
-        payload: dict[str, Any] = {"url": url, "maxPages": self.max_pages}
+        payload: dict[str, Any] = {"url": url}
+        # Context.dev has a provider-side maximum. Leave this unset when using
+        # that provider's default, and use the local backend for unbounded sites.
+        if self.max_pages > 0:
+            payload["maxPages"] = self.max_pages
         if self.force_recrawl: payload["maxAgeMs"] = 0
         started = time.monotonic()
         logger.info("Context.dev extraction started url=%s provider=%s", url, self.provider_name)
@@ -186,4 +192,56 @@ def _clean_text(text: str) -> str:
 
 
 def get_website_extractor(*, force_recrawl: bool = False) -> WebsiteKnowledgeExtractor:
+    settings = get_settings()
+    backend = settings.crawl_backend.lower()
+    if backend == "playwright" or (backend == "auto" and (not settings.context_dev_api_key or settings.crawl_max_pages <= 0)):
+        return PlaywrightExtractor()
+    if backend not in {"auto", "context_dev"}:
+        raise ValueError(f"Unsupported CRAWL_BACKEND: {settings.crawl_backend}")
     return ContextDevExtractor(force_recrawl=force_recrawl)
+
+
+class PlaywrightExtractor(WebsiteKnowledgeExtractor):
+    """Crawl the complete same-domain frontier without a page-count cap."""
+
+    provider_name = "PLAYWRIGHT"
+
+    def __init__(self):
+        self.settings = get_settings()
+
+    def _crawl(self, url: str):
+        from .crawler import crawl_domain
+        return crawl_domain(
+            url,
+            max_pages=self.settings.crawl_max_pages,
+            timeout=self.settings.crawl_timeout,
+            respect_robots=self.settings.crawl_respect_robots,
+            render_javascript=self.settings.render_javascript,
+            network_idle_timeout=self.settings.network_idle_timeout,
+            post_render_delay=self.settings.post_render_delay,
+            return_result=True,
+        )
+
+    def analyze_website(self, url: str) -> WebsiteAnalysisResult:
+        result = self._crawl(url)
+        pages = [DiscoveredPage(page.url, page.title) for page in result.pages]
+        return WebsiteAnalysisResult(
+            url=url, pages=pages, categories=_categories_from_pages(pages),
+            estimated_knowledge_size=_estimate_size(len(pages)),
+            analyzed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            provider=self.provider_name,
+        )
+
+    def extract_knowledge(self, url: str) -> KnowledgeExtractionResult:
+        result = self._crawl(url)
+        pages = _clean_pages([ExtractedPage(p.url, p.title, p.text) for p in result.pages])
+        if not pages:
+            raise RuntimeError("Crawler returned no usable website content")
+        return KnowledgeExtractionResult(
+            pages=pages, provider=self.provider_name,
+            raw_pages=result.metrics.total_pages_crawled,
+            warnings=result.metrics.warnings,
+        )
+
+    def extract(self, url: str) -> KnowledgeExtractionResult:
+        return self.extract_knowledge(url)

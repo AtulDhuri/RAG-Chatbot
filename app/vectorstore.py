@@ -14,7 +14,8 @@ def _embed(texts):
     response=client.embeddings.create(model=settings.openai_embedding_model,input=texts)
     return [item.embedding for item in response.data]
 
-def _embed_batched(texts,batch_size=64):
+def _embed_batched(texts,batch_size=None):
+    batch_size = batch_size or max(1, settings.embedding_batch_size)
     result=[]
     for start in range(0,len(texts),batch_size): result.extend(_embed(texts[start:start+batch_size]))
     return result
