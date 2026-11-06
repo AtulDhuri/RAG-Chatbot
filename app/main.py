@@ -105,7 +105,7 @@ def website_preview(url:str=Query(...,min_length=1,max_length=1000)):
     except ValueError as exc: raise HTTPException(400,str(exc))
     except Exception as exc:
         logger.warning('Website preview failed for %s: %s',url,exc)
-        raise HTTPException(502,'Unable to discover website pages through Context.dev')
+        raise HTTPException(502,'Unable to discover website pages')
 
 @app.post('/api/admin/chatbots/{chatbot_id}/analyze',dependencies=[Depends(admin)])
 def analyze_chatbot(chatbot_id:str):
