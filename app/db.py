@@ -13,6 +13,7 @@ from .config import get_settings
 SCHEMA_STATEMENTS = [
 """CREATE TABLE IF NOT EXISTS chatbots (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL DEFAULT '', customer_name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', mobile TEXT NOT NULL DEFAULT '', chatbot_name TEXT NOT NULL, website_url TEXT NOT NULL DEFAULT '', allowed_domain TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('active','suspended','expired')), subscription_plan TEXT NOT NULL DEFAULT 'monthly', subscription_start_date TEXT NOT NULL, subscription_end_date TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
 """ALTER TABLE chatbots ADD COLUMN IF NOT EXISTS customer_name TEXT NOT NULL DEFAULT ''""",
+"""CREATE UNIQUE INDEX IF NOT EXISTS chatbots_allowed_domain_uidx ON chatbots (lower(regexp_replace(allowed_domain, '^www\\.', '')))""",
 """ALTER TABLE chatbots ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''""",
 """ALTER TABLE chatbots ADD COLUMN IF NOT EXISTS mobile TEXT NOT NULL DEFAULT ''""",
 """ALTER TABLE chatbots ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT ''""",
@@ -127,6 +128,13 @@ def create_chatbot(data):
 
 def upsert_chatbot(name,customer_id,domain,start,end):
     return create_chatbot({'customer_id':customer_id,'customer_name':customer_id,'email':'','mobile':'','chatbot_name':name,'website_url':domain,'allowed_domain':domain,'subscription_plan':'monthly','subscription_start_date':start,'subscription_end_date':end,'status':'active'})
+
+def delete_chatbots_by_domain(domain):
+    normalized=domain.strip().lower().removeprefix('https://').removeprefix('http://').removeprefix('www.').split('/')[0].split(':')[0]
+    with _get_pool().connection() as c:
+        with c.transaction():
+            rows=c.execute("DELETE FROM chatbots WHERE lower(regexp_replace(allowed_domain, '^www\\.', ''))=%s RETURNING id,chatbot_name,allowed_domain,email",(normalized,)).fetchall()
+    return rows
 
 def list_chatbots(search='',status='',plan='',knowledge_status='',limit=25,offset=0,sort='created_at',direction='desc'):
     allowed={'customer_name','chatbot_name','allowed_domain','status','subscription_plan','created_at','subscription_end_date'}; sort=sort if sort in allowed else 'created_at'; direction='ASC' if direction.lower()=='asc' else 'DESC'; where=[]; args=[]

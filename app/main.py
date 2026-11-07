@@ -243,6 +243,11 @@ def update_lead_settings(chatbot_id:str,req:LeadSettingsRequest):
 @app.get('/api/admin/chatbots',dependencies=[Depends(admin)])
 def list_chatbots(search:str='',status:str='',plan:str='',knowledge_status:str='',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),sort:str='created_at',direction:str='desc'):
     result=db.list_chatbots(search,status,plan,knowledge_status,page_size,(page-1)*page_size,sort,direction); return {'items':result['items'],'total':result['total'],'page':page,'page_size':page_size,'pages':(result['total']+page_size-1)//page_size}
+@app.delete('/api/admin/domains/{domain}',dependencies=[Depends(admin)])
+def delete_domain(domain:str):
+    deleted=db.delete_chatbots_by_domain(domain)
+    for row in deleted: widget_cache.invalidate(row['id'],domain)
+    return {'success':True,'domain':domain,'deleted_chatbots':[dict(row) for row in deleted]}
 @app.get('/api/admin/chatbots/{chatbot_id}',dependencies=[Depends(admin)])
 def get_admin_chatbot(chatbot_id:str):
     bot=db.get_chatbot(chatbot_id)

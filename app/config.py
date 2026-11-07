@@ -1,5 +1,6 @@
 """Environment-based settings for the multi-tenant RAG chatbot."""
 from functools import lru_cache
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,8 +44,8 @@ class Settings(BaseSettings):
     admin_api_key: str = ""
     smtp_host: str = ""
     smtp_port: int = 587
-    smtp_username: str = ""
-    smtp_password: str = ""
+    smtp_username: str = Field(default="", validation_alias=AliasChoices("SMTP_USERNAME", "SMTP_USER", "EMAIL_USER"))
+    smtp_password: str = Field(default="", validation_alias=AliasChoices("SMTP_PASSWORD", "SMTP_PASS", "EMAIL_PASS"))
     smtp_from: str = ""
     smtp_tls: bool = True
     lead_notification_email: str = "dineossite@gmail.com"

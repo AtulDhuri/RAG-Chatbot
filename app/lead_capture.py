@@ -104,7 +104,7 @@ def send_portal_credentials_email(recipient: str, client_id: str, password: str,
     message = EmailMessage()
     message["Subject"] = "Your DineOS Client Portal Login"
     message["To"] = recipient
-    message["From"] = getattr(settings, "smtp_from", "") or recipient
+    message["From"] = getattr(settings, "smtp_from", "") or getattr(settings, "smtp_username", "") or recipient
     message.set_content(
         f"Your DineOS client portal is ready.\n\n"
         f"Portal link: {portal_url}\n"
@@ -141,7 +141,7 @@ def notify_lead(lead) -> bool:
     if not host:
         logger.warning("Lead notification skipped because SMTP_HOST is not configured")
         return False
-    message = EmailMessage(); message["Subject"] = "New Lead Received"; message["To"] = recipient; message["From"] = getattr(settings, "smtp_from", "") or recipient
+    message = EmailMessage(); message["Subject"] = "New Lead Received"; message["To"] = recipient; message["From"] = getattr(settings, "smtp_from", "") or getattr(settings, "smtp_username", "") or recipient
     message.set_content(f"New Lead Received\n\nName: {lead['name']}\nEmail: {lead['email']}\nPhone: {lead['phone']}\nInterested In: {lead['interested_in']}\n\nLead Summary:\n{lead['lead_summary']}\n")
     try:
         with smtplib.SMTP(host, int(getattr(settings, "smtp_port", 587)), timeout=10) as smtp:
