@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib, secrets, time
 from datetime import datetime, timezone
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from contextlib import contextmanager
+import hashlib, secrets, time
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from .config import get_settings
@@ -37,6 +40,38 @@ SCHEMA_STATEMENTS = [
 """CREATE TABLE IF NOT EXISTS ingestion_pages (run_id TEXT NOT NULL REFERENCES ingestion_runs(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', processed_at TEXT, PRIMARY KEY (run_id, ordinal))""",
 "CREATE INDEX IF NOT EXISTS ingestion_pages_pending_idx ON ingestion_pages(run_id, status, ordinal)",
 "CREATE INDEX IF NOT EXISTS security_logs_chatbot_idx ON security_logs(chatbot_id, created_at)",
+"""CREATE TABLE IF NOT EXISTS lead_capture_settings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, enabled BOOLEAN NOT NULL DEFAULT TRUE, notification_email TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE UNIQUE INDEX IF NOT EXISTS lead_capture_settings_tenant_uidx ON lead_capture_settings(tenant_id)",
+"""CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, conversation_id TEXT, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL, interested_in TEXT NOT NULL, lead_summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','notified')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS leads_tenant_created_idx ON leads(tenant_id, created_at DESC)",
+"CREATE INDEX IF NOT EXISTS leads_conversation_idx ON leads(tenant_id, conversation_id)",
+"""CREATE TABLE IF NOT EXISTS portal_credentials (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, client_id TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE UNIQUE INDEX IF NOT EXISTS portal_credentials_tenant_uidx ON portal_credentials(tenant_id)",
+"""CREATE TABLE IF NOT EXISTS portal_sessions (id TEXT PRIMARY KEY, credential_id TEXT NOT NULL REFERENCES portal_credentials(id) ON DELETE CASCADE, session_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS portal_sessions_expiry_idx ON portal_sessions(expires_at)",
+"""CREATE TABLE IF NOT EXISTS chat_conversations (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, visitor_id TEXT, source_page_url TEXT, started_at TEXT NOT NULL, ended_at TEXT, message_count INTEGER NOT NULL DEFAULT 0, lead_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS chat_conversations_tenant_started_idx ON chat_conversations(tenant_id, started_at DESC)",
+"CREATE INDEX IF NOT EXISTS chat_conversations_visitor_idx ON chat_conversations(tenant_id, visitor_id)",
+"""CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('visitor','assistant')), content TEXT NOT NULL, source_urls TEXT NOT NULL DEFAULT '[]', answer_status TEXT, created_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS chat_messages_conversation_idx ON chat_messages(conversation_id, created_at)",
+"CREATE INDEX IF NOT EXISTS chat_messages_tenant_created_idx ON chat_messages(tenant_id, created_at DESC)",
+"""CREATE TABLE IF NOT EXISTS chat_analytics (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL, source_page_url TEXT, question TEXT NOT NULL, answer_status TEXT NOT NULL, confidence_score NUMERIC, fallback_used BOOLEAN NOT NULL DEFAULT FALSE, lead_created BOOLEAN NOT NULL DEFAULT FALSE, topic TEXT, normalized_question TEXT, created_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS chat_analytics_tenant_created_idx ON chat_analytics(tenant_id, created_at DESC)",
+"CREATE INDEX IF NOT EXISTS chat_analytics_unanswered_idx ON chat_analytics(tenant_id, answer_status, created_at DESC)",
+"CREATE INDEX IF NOT EXISTS chat_analytics_page_idx ON chat_analytics(tenant_id, source_page_url)",
+"""CREATE TABLE IF NOT EXISTS question_groups (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, group_name TEXT NOT NULL, representative_question TEXT NOT NULL, question_count INTEGER NOT NULL DEFAULT 0, lead_count INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS question_groups_tenant_frequency_idx ON question_groups(tenant_id, question_count DESC)",
+"""CREATE TABLE IF NOT EXISTS question_group_members (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES question_groups(id) ON DELETE CASCADE, analytics_id TEXT NOT NULL REFERENCES chat_analytics(id) ON DELETE CASCADE, similarity_score NUMERIC, created_at TEXT NOT NULL)""",
+"CREATE UNIQUE INDEX IF NOT EXISTS question_group_members_unique_idx ON question_group_members(group_id, analytics_id)",
+"""CREATE TABLE IF NOT EXISTS topic_analytics (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, analytics_id TEXT NOT NULL REFERENCES chat_analytics(id) ON DELETE CASCADE, topic_name TEXT NOT NULL, confidence_score NUMERIC, created_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS topic_analytics_tenant_topic_idx ON topic_analytics(tenant_id, topic_name, created_at DESC)",
+"""CREATE TABLE IF NOT EXISTS unanswered_questions (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, analytics_id TEXT REFERENCES chat_analytics(id) ON DELETE SET NULL, question TEXT NOT NULL, normalized_question TEXT NOT NULL, frequency INTEGER NOT NULL DEFAULT 1, suggested_action TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','reviewed','resolved')), first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS unanswered_questions_tenant_frequency_idx ON unanswered_questions(tenant_id, frequency DESC, last_seen_at DESC)",
+"""CREATE TABLE IF NOT EXISTS page_analytics (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, page_url TEXT NOT NULL, conversations_started INTEGER NOT NULL DEFAULT 0, leads_generated INTEGER NOT NULL DEFAULT 0, question_count INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"CREATE UNIQUE INDEX IF NOT EXISTS page_analytics_tenant_url_uidx ON page_analytics(tenant_id, page_url)",
+"CREATE INDEX IF NOT EXISTS page_analytics_tenant_leads_idx ON page_analytics(tenant_id, leads_generated DESC)",
+"""CREATE TABLE IF NOT EXISTS visitor_insights (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, insight_type TEXT NOT NULL, insight_text TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL, supporting_data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)""",
+"CREATE INDEX IF NOT EXISTS visitor_insights_tenant_period_idx ON visitor_insights(tenant_id, period_end DESC)",
 """DO $$ BEGIN IF to_regclass('public.knowledge_base') IS NOT NULL THEN INSERT INTO knowledge_bases SELECT * FROM knowledge_base ON CONFLICT (chatbot_id) DO NOTHING; END IF; END $$""",
 ]
 _pool: ConnectionPool | None = None
@@ -85,6 +120,7 @@ def create_chatbot(data):
         with c.transaction():
             c.execute('INSERT INTO chatbots (id,customer_id,customer_name,email,mobile,chatbot_name,website_url,allowed_domain,status,subscription_plan,subscription_start_date,subscription_end_date,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)',(cid,data.get('customer_id',''),data['customer_name'],data['email'],data.get('mobile',''),data['chatbot_name'],website,domain,data.get('status','active'),data['subscription_plan'],data['subscription_start_date'],data['subscription_end_date'],stamp,stamp))
             c.execute('INSERT INTO knowledge_bases (chatbot_id,website_url,knowledge_status,created_at,updated_at) VALUES (%s,%s,%s,%s,%s)',(cid,website,'pending',stamp,stamp))
+            c.execute('INSERT INTO lead_capture_settings (id,tenant_id,enabled,notification_email,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s)',(secrets.token_urlsafe(18),cid,True,data['email'],stamp,stamp))
     return cid
 
 def upsert_chatbot(name,customer_id,domain,start,end):
@@ -136,7 +172,8 @@ def ingestion_pages(run_id, status=None):
 def save_ingestion_pages(run_id, pages):
     with _get_pool().connection() as c:
         with c.transaction():
-            c.executemany('INSERT INTO ingestion_pages (run_id,ordinal,url,title,text) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (run_id,ordinal) DO UPDATE SET url=EXCLUDED.url,title=EXCLUDED.title,text=EXCLUDED.text,status=\'pending\',processed_at=NULL',[(run_id,i,p.url,p.title,p.text) for i,p in enumerate(pages)])
+            with c.cursor() as cursor:
+                cursor.executemany('INSERT INTO ingestion_pages (run_id,ordinal,url,title,text) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (run_id,ordinal) DO UPDATE SET url=EXCLUDED.url,title=EXCLUDED.title,text=EXCLUDED.text,status=\'pending\',processed_at=NULL',[(run_id,i,p.url,p.title,p.text) for i,p in enumerate(pages)])
             c.execute('UPDATE ingestion_runs SET pages_total=%s,updated_at=%s WHERE id=%s',(len(pages),now(),run_id))
 
 def update_ingestion_run(run_id, **fields):

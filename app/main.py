@@ -1,5 +1,5 @@
 """Secure widget API and PostgreSQL-backed SaaS administration portal API."""
-import csv, io, json, logging
+import csv, io, json, logging, secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from .config import get_settings
 from .extractor import ContextDevExtractor
-from . import auth, db, indexer, rag, vectorstore, widget_cache
+from . import auth, db, indexer, rag, vectorstore, widget_cache, lead_capture, portal
 from .subscription_sync import start as start_subscription_sync
 from .security import validate_chatbot, reject
 
@@ -41,12 +41,17 @@ app.add_middleware(CORSMiddleware,allow_origins=['*'],allow_credentials=False,al
 
 class InitRequest(BaseModel): chatbot_id:str=Field(...,min_length=1,max_length=100)
 class WidgetValidateRequest(BaseModel): chatbot_id:str=Field(...,min_length=1,max_length=100); current_domain:str=Field(...,min_length=1,max_length=255); widget_version:str=Field(...,min_length=1,max_length=40)
-class ChatRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000)
+class PortalLoginRequest(BaseModel): client_id:str=Field(...,min_length=1,max_length=120); password:str=Field(...,min_length=1,max_length=200)
+class PortalCredentialRequest(BaseModel): password:str=Field(...,min_length=10,max_length=200)
+class ChatRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); conversation_id:str|None=Field(None,max_length=120)
+class LeadIntentRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); context:str=''; conversation_id:str|None=Field(None,max_length=120)
+class LeadRequest(BaseModel): conversation_id:str|None=Field(None,max_length=120); name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); phone:str=Field(...,min_length=1,max_length=80); interested_in:str=Field(...,min_length=1,max_length=1000); context:str=''
+class LeadSettingsRequest(BaseModel): enabled:bool=True; notification_email:str=Field(...,min_length=3,max_length=254)
 class AdminLoginRequest(BaseModel): api_key:str=Field(...,min_length=1)
 class ChatbotRequest(BaseModel):
     customer_name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); mobile:str=''
     chatbot_name:str=Field(...,min_length=1,max_length=160); website_url:str=Field(...,min_length=1,max_length=1000); allowed_domain:str=Field(...,min_length=1,max_length=255)
-    subscription_plan:str=Field(...,pattern='^(monthly|quarterly|yearly)$'); subscription_start_date:datetime; subscription_end_date:datetime; status:str=Field('active',pattern='^(active|suspended)$'); customer_id:str=''
+    subscription_plan:str=Field(...,pattern='^(monthly|quarterly|yearly)$'); subscription_start_date:datetime; subscription_end_date:datetime; status:str=Field('active',pattern='^(active|suspended)$'); customer_id:str=''; portal_password:str|None=None
 class ChatbotUpdate(BaseModel):
     customer_name:str|None=None; email:str|None=None; mobile:str|None=None; chatbot_name:str|None=None; website_url:str|None=None; allowed_domain:str|None=None; subscription_plan:str|None=None; subscription_start_date:datetime|None=None; subscription_end_date:datetime|None=None; status:str|None=None
 class RenewRequest(BaseModel): plan:str=Field(...,pattern='^(monthly|quarterly|yearly)$')
@@ -68,6 +73,48 @@ def widget_validate(req:WidgetValidateRequest,request:Request):
     entry=widget_cache.validate(request,req.chatbot_id,req.current_domain)
     return {'success':True,'chatbotId':entry['chatbot_id'],'status':'active'}
 
+@app.post('/api/portal/login')
+def portal_login(req:PortalLoginRequest):
+    result=portal.login(req.client_id,req.password)
+    if not result: raise HTTPException(401,'Invalid portal credentials')
+    return result
+
+def portal_user(request:Request):
+    value=request.headers.get('Authorization','')
+    if not value.startswith('Bearer '): raise HTTPException(401,'Portal authentication required')
+    result=portal.session(value[7:])
+    if not result: raise HTTPException(401,'Portal session expired')
+    return result
+@app.post('/api/admin/chatbots/{chatbot_id}/portal-credentials',dependencies=[Depends(admin)])
+def create_portal_credentials(chatbot_id:str,req:PortalCredentialRequest):
+    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
+    try: return dict(portal.create_credentials(chatbot_id,req.password))
+    except ValueError as exc: raise HTTPException(422,str(exc))
+@app.get('/api/portal/dashboard')
+def portal_dashboard(request:Request,user=Depends(portal_user)): return portal.dashboard(user['tenant_id'])
+@app.get('/api/portal/conversations')
+def portal_conversations(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),user=Depends(portal_user)): return {'items':[dict(x) for x in portal.conversations(user['tenant_id'],limit,offset)]}
+@app.get('/api/portal/conversations/{conversation_id}')
+def portal_conversation(conversation_id:str,request:Request,user=Depends(portal_user)):
+    result=portal.conversation(user['tenant_id'],conversation_id)
+    if not result: raise HTTPException(404,'Conversation not found')
+    return result
+@app.get('/api/portal/questions/most-asked')
+def portal_most_asked(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.most_asked(user['tenant_id'])]}
+@app.get('/api/portal/questions/unanswered')
+def portal_unanswered(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.unanswered(user['tenant_id'])]}
+@app.get('/api/portal/topics')
+def portal_topics(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.topics(user['tenant_id'])]}
+@app.get('/api/portal/leads')
+def portal_leads(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),user=Depends(portal_user)): return {'items':[dict(x) for x in lead_capture.list_leads(user['tenant_id'],limit,offset)]}
+@app.get('/api/portal/leads/{lead_id}')
+def portal_lead(lead_id:str,request:Request,user=Depends(portal_user)):
+    lead=lead_capture.get_lead(lead_id)
+    if not lead or lead['tenant_id'] != user['tenant_id']: raise HTTPException(404,'Lead not found')
+    details=dict(lead); details['conversation']=portal.conversation(user['tenant_id'],lead['conversation_id']) if lead['conversation_id'] else None
+    return details
+@app.post('/api/portal/logout')
+def portal_logout(): return {'success':True}
 @app.post('/api/chat/init')
 def chat_init(req:InitRequest,request:Request):
     origin=urlparse(request.headers.get('origin','')).hostname or ''
@@ -83,18 +130,42 @@ def authorized_bot(request:Request):
 def chat(request:Request,req:ChatRequest,bot=Depends(authorized_bot)):
     kb=db.knowledge(bot['id'])
     if not kb or kb['knowledge_status']!='ready' or not vectorstore.is_indexed(bot['id']):return {'answer':"This site's knowledge base is not ready yet. Please try again shortly.",'sources':[],'status':'indexing'}
-    result=rag.answer(bot['id'],req.message); return {'answer':result['answer'],'sources':result['sources'],'status':'ready'}
+    result=rag.answer(bot['id'],req.message)
+    try: portal.record_exchange(bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered',request.headers.get('referer'))
+    except Exception: logger.exception('Analytics recording failed')
+    return {'answer':result['answer'],'sources':result['sources'],'status':'ready'}
+@app.post('/api/chat/lead-intent')
+@limiter.limit(settings.chat_rate_limit)
+def lead_intent(request:Request,req:LeadIntentRequest,bot=Depends(authorized_bot)):
+    result=lead_capture.analyze_intent(req.message,req.context)
+    return {'intent':result['intent'],'confidence':result['confidence'],'category':result['category'],'offer_contact':bool(result['intent'] and result['confidence']>=0.6),'conversation_id':req.conversation_id}
+@app.post('/api/leads')
+@limiter.limit('10/minute')
+def create_lead(request:Request,req:LeadRequest,bot=Depends(authorized_bot)):
+    if not req.email or '@' not in req.email: raise HTTPException(422,'Valid email is required')
+    lead=lead_capture.create_lead(bot['id'],req.conversation_id,req.name.strip(),req.email.strip(),req.phone.strip(),req.interested_in.strip(),req.context)
+    return {'success':True,'lead':dict(lead)}
 @app.post('/api/chat/stream')
 @limiter.limit(settings.chat_rate_limit)
 def chat_stream(request:Request,req:ChatRequest,bot=Depends(authorized_bot)):
     def events():
-        for event in rag.stream_answer(bot['id'],req.message): yield f"data: {json.dumps(event)}\n\n"
+        conversation_id=req.conversation_id or secrets.token_urlsafe(18); answer_parts=[]; sources=[]; answer_status='answered'
+        for event in rag.stream_answer(bot['id'],req.message):
+            if event.get('type')=='token': answer_parts.append(event.get('text',''))
+            if event.get('type')=='final': sources=event.get('sources',[])
+            yield f"data: {json.dumps(event)}\n\n"
+        try: portal.record_exchange(bot['id'],conversation_id,req.message,''.join(answer_parts),sources,answer_status,request.headers.get('referer'))
+        except Exception: logger.exception('Analytics recording failed')
         yield 'data: [DONE]\n\n'
     return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 @app.get('/api/status')
 def status(request:Request,bot=Depends(authorized_bot)):
     snap=indexer.get_progress(bot['id']); kb=db.knowledge(bot['id']); return {'chatbot_id':bot['id'],'phase':kb['knowledge_status'] if kb else snap['phase'],'indexing':snap['indexing'],'indexed':bool(kb and kb['knowledge_status']=='ready'),'pages_done':snap['pages_done'],'pages_known':snap['pages_known'],'chunks':snap['chunks'],'last_url':snap['last_url'],'knowledge_version':kb['knowledge_base_version'] if kb else 0,'crawl_metrics':snap.get('crawl_metrics',{}),'source_provider':kb['source_provider'] if kb else 'CONTEXT_DEV','crawl_status':kb['crawl_status'] if kb else 'PENDING','website_name':kb['website_name'] if kb else '','estimated_knowledge_size':kb['estimated_knowledge_size'] if kb else 'unknown','categories':json.loads(kb['categories'] or '[]') if kb else [],'pages_found':kb['pages_found'] if kb else 0,'last_analyzed_at':kb['last_analyzed_at'] if kb else None,'total_pages':kb['pages_crawled'] if kb else 0,'total_chunks':kb['total_chunks'] if kb else 0,'total_tokens':kb['total_tokens'] if kb else 0,'error_details':kb['error_details'] if kb else ''}
 
+@app.get('/portal')
+def portal_page(): return FileResponse(STATIC_DIR/'portal.html',media_type='text/html')
+@app.get('/leads')
+def leads_page():return FileResponse(STATIC_DIR/'leads.html',media_type='text/html')
 @app.get('/admin')
 def admin_page(): return FileResponse(STATIC_DIR/'admin.html',media_type='text/html')
 @app.get('/api/admin/website-preview',dependencies=[Depends(admin)])
@@ -124,9 +195,30 @@ def analyze_chatbot(chatbot_id:str):
 @app.post('/api/admin/chatbots',dependencies=[Depends(admin)])
 def create_chatbot(req:ChatbotRequest, crawl:bool=False):
     if req.subscription_end_date<req.subscription_start_date:raise HTTPException(400,'Invalid subscription dates')
-    data=req.model_dump(); data['allowed_domain']=normalize_domain(data['allowed_domain']); data['website_url']=data['website_url'].strip(); cid=db.create_chatbot(data)
+    data=req.model_dump(); portal_password=data.pop('portal_password',None)
+    if portal_password and len(portal_password)<10: raise HTTPException(422,'Portal password must contain at least 10 characters')
+    data['allowed_domain']=normalize_domain(data['allowed_domain']); data['website_url']=data['website_url'].strip(); cid=db.create_chatbot(data)
+    if portal_password:
+        try: portal.create_credentials(cid,portal_password)
+        except ValueError as exc: raise HTTPException(422,str(exc))
     if crawl:indexer.ensure_indexed(cid,data['website_url'] or data['allowed_domain'],force=True)
-    return {'chatbot_id':cid,'status':'started' if crawl else 'pending','install_code':f'<script src="{settings.public_base_url or ""}/chatbot.js" data-chatbot-id="{cid}" defer></script>'}
+    return {'chatbot_id':cid,'status':'started' if crawl else 'pending','install_code':f'<script src="{settings.public_base_url or ""}/chatbot.js?v=portal-analytics-1" data-chatbot-id="{cid}" defer></script>'}
+@app.get('/api/admin/leads',dependencies=[Depends(admin)])
+def admin_leads(tenant_id:str='',limit:int=Query(50,ge=1,le=200),offset:int=Query(0,ge=0)):
+    return {'items':[dict(row) for row in lead_capture.list_leads(tenant_id or None,limit,offset)]}
+@app.get('/api/admin/leads/{lead_id}',dependencies=[Depends(admin)])
+def admin_lead(lead_id:str):
+    lead=lead_capture.get_lead(lead_id)
+    if not lead: raise HTTPException(404,'Lead not found')
+    return dict(lead)
+@app.get('/api/admin/chatbots/{chatbot_id}/lead-settings',dependencies=[Depends(admin)])
+def admin_lead_settings(chatbot_id:str):
+    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
+    return dict(lead_capture.get_settings_for_tenant(chatbot_id) or {'tenant_id':chatbot_id,'enabled':False,'notification_email':''})
+@app.put('/api/admin/chatbots/{chatbot_id}/lead-settings',dependencies=[Depends(admin)])
+def update_lead_settings(chatbot_id:str,req:LeadSettingsRequest):
+    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
+    return dict(lead_capture.save_settings(chatbot_id,req.enabled,req.notification_email.strip()))
 @app.get('/api/admin/chatbots',dependencies=[Depends(admin)])
 def list_chatbots(search:str='',status:str='',plan:str='',knowledge_status:str='',page:int=Query(1,ge=1),page_size:int=Query(25,ge=1,le=100),sort:str='created_at',direction:str='desc'):
     result=db.list_chatbots(search,status,plan,knowledge_status,page_size,(page-1)*page_size,sort,direction); return {'items':result['items'],'total':result['total'],'page':page,'page_size':page_size,'pages':(result['total']+page_size-1)//page_size}
@@ -137,7 +229,7 @@ def get_admin_chatbot(chatbot_id:str):
     data=dict(bot); knowledge=db.knowledge(chatbot_id)
     if knowledge:
         data.update({key:knowledge[key] for key in ('knowledge_status','crawl_status','pages_found','pages_crawled','total_chunks','total_tokens','estimated_knowledge_size','last_analyzed_at','last_crawled_at','source_provider','embedding_provider','error_details') if key in knowledge})
-    data['install_code']=f'<script src="{settings.public_base_url or ""}/chatbot.js" data-chatbot-id="{chatbot_id}" defer></script>'; return data
+    data['install_code']=f'<script src="{settings.public_base_url or ""}/chatbot.js?v=portal-analytics-1" data-chatbot-id="{chatbot_id}" defer></script>'; return data
 @app.get('/api/admin/chatbots/{chatbot_id}/crawled-urls',dependencies=[Depends(admin)])
 def crawled_urls(chatbot_id:str,limit:int=Query(1000,ge=1,le=5000),offset:int=Query(0,ge=0)):
     if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
