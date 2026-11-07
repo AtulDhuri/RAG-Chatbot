@@ -72,6 +72,8 @@ SCHEMA_STATEMENTS = [
 "CREATE INDEX IF NOT EXISTS page_analytics_tenant_leads_idx ON page_analytics(tenant_id, leads_generated DESC)",
 """CREATE TABLE IF NOT EXISTS visitor_insights (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, insight_type TEXT NOT NULL, insight_text TEXT NOT NULL, period_start TEXT NOT NULL, period_end TEXT NOT NULL, supporting_data TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)""",
 "CREATE INDEX IF NOT EXISTS visitor_insights_tenant_period_idx ON visitor_insights(tenant_id, period_end DESC)",
+"""CREATE TABLE IF NOT EXISTS lead_capture_keywords (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, keyword TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TEXT NOT NULL)""",
+"CREATE UNIQUE INDEX IF NOT EXISTS lead_capture_keywords_tenant_keyword_uidx ON lead_capture_keywords(tenant_id, keyword)",
 """DO $$ BEGIN IF to_regclass('public.knowledge_base') IS NOT NULL THEN INSERT INTO knowledge_bases SELECT * FROM knowledge_base ON CONFLICT (chatbot_id) DO NOTHING; END IF; END $$""",
 ]
 _pool: ConnectionPool | None = None

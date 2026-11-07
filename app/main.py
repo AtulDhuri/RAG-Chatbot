@@ -47,6 +47,7 @@ class ChatRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000
 class LeadIntentRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); context:str=''; conversation_id:str|None=Field(None,max_length=120)
 class LeadRequest(BaseModel): conversation_id:str|None=Field(None,max_length=120); name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); phone:str=Field(...,min_length=1,max_length=80); interested_in:str=Field(...,min_length=1,max_length=1000); context:str=''
 class LeadSettingsRequest(BaseModel): enabled:bool=True; notification_email:str=Field(...,min_length=3,max_length=254)
+class LeadKeywordsRequest(BaseModel): keywords:list[str]=Field(default_factory=list, max_length=50)
 class AdminLoginRequest(BaseModel): api_key:str=Field(...,min_length=1)
 class ChatbotRequest(BaseModel):
     customer_name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); mobile:str=''
@@ -137,7 +138,7 @@ def chat(request:Request,req:ChatRequest,bot=Depends(authorized_bot)):
 @app.post('/api/chat/lead-intent')
 @limiter.limit(settings.chat_rate_limit)
 def lead_intent(request:Request,req:LeadIntentRequest,bot=Depends(authorized_bot)):
-    result=lead_capture.analyze_intent(req.message,req.context)
+    result=lead_capture.analyze_intent(req.message,req.context,bot['id'])
     return {'intent':result['intent'],'confidence':result['confidence'],'category':result['category'],'offer_contact':bool(result['intent'] and result['confidence']>=0.6),'conversation_id':req.conversation_id}
 @app.post('/api/leads')
 @limiter.limit('10/minute')
@@ -211,6 +212,14 @@ def admin_lead(lead_id:str):
     lead=lead_capture.get_lead(lead_id)
     if not lead: raise HTTPException(404,'Lead not found')
     return dict(lead)
+@app.get('/api/admin/chatbots/{chatbot_id}/lead-keywords',dependencies=[Depends(admin)])
+def admin_lead_keywords(chatbot_id:str):
+    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
+    return {'items':[dict(row) for row in lead_capture.list_keywords(chatbot_id)]}
+@app.put('/api/admin/chatbots/{chatbot_id}/lead-keywords',dependencies=[Depends(admin)])
+def update_lead_keywords(chatbot_id:str,req:LeadKeywordsRequest):
+    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
+    return {'items':[dict(row) for row in lead_capture.replace_keywords(chatbot_id,req.keywords)]}
 @app.get('/api/admin/chatbots/{chatbot_id}/lead-settings',dependencies=[Depends(admin)])
 def admin_lead_settings(chatbot_id:str):
     if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')

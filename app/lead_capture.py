@@ -16,7 +16,9 @@ _client = OpenAI(api_key=settings.openai_api_key) if settings.openai_api_key els
 
 _INTENT_PROMPT = """Classify whether the visitor shows genuine commercial buying intent. Return JSON only with keys intent (boolean), confidence (0 to 1), category, and reason. Consider the latest message and prior context. Questions asking for information alone are not consent to contact them."""
 _INTENT_TERMS = {
-    "sales": ("consultation", "schedule", "book", "appointment", "inquire", "connect", "callback", "evaluate", "audit", "assessment", "contact sales", "call me", "talk to team", "proposal", "quotation", "demo"),
+    "sales": ("pricing", "cost", "quote", "demo", "book demo", "schedule demo", "contact sales", "talk to sales", "sales team", "trial", "subscription", "plan", "enterprise plan", "purchase", "buy", "onboarding"),
+    "implementation": ("implementation", "migration", "setup help", "integration", "onboarding process", "deployment"),
+    "business": ("interested", "want to know more", "let's discuss", "contact me", "call me", "reach out", "can someone contact me"),
     "pricing": ("pricing", "plans", "cost", "rate", "fee", "budget", "estimate", "discount", "cheaper", "affordable"),
     "trial": ("trial", "sandbox", "access", "account", "setup", "install", "deploy", "integrate"),
     "purchase": ("buy", "purchase", "order", "subscribe", "upgrade", "renew", "premium", "license"),
@@ -24,24 +26,34 @@ _INTENT_TERMS = {
 }
 
 
-def _fallback_intent(message: str, context: str = "") -> dict:
+def custom_keywords(tenant_id: str) -> list[str]:
+    with db._get_pool().connection() as connection:
+        return [row['keyword'] for row in connection.execute('SELECT keyword FROM lead_capture_keywords WHERE tenant_id=%s AND enabled=TRUE ORDER BY keyword', (tenant_id,)).fetchall()]
+
+
+def _fallback_intent(message: str, context: str = "", extra_keywords=None) -> dict:
     text = f"{context} {message}".lower()
-    scores = {category: sum(1 for term in terms if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text)) for category, terms in _INTENT_TERMS.items()}
+    terms_map = dict(_INTENT_TERMS); terms_map['custom'] = tuple(extra_keywords or ())
+    scores = {category: sum(1 for term in terms if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text)) for category, terms in terms_map.items()}
     category, score = max(scores.items(), key=lambda item: item[1])
     consent_language = any(phrase in text for phrase in ("contact me", "call me", "talk to me", "send me", "i want a demo", "schedule a demo"))
-    return {"intent": bool(score and (consent_language or category in {"sales", "trial", "purchase"})), "confidence": min(0.95, 0.55 + score * 0.1) if score else 0.1, "category": category if score else "general", "reason": "commercial intent signals detected" if score else "no clear commercial intent"}
+    return {"intent": bool(score and (consent_language or category in {"sales", "trial", "purchase", "implementation", "business", "custom"})), "confidence": min(0.95, 0.55 + score * 0.1) if score else 0.1, "category": category if score else "general", "reason": "commercial intent signals detected" if score else "no clear commercial intent"}
 
 
-def analyze_intent(message: str, context: str = "") -> dict:
+def analyze_intent(message: str, context: str = "", tenant_id: str | None = None) -> dict:
+    extra_keywords = custom_keywords(tenant_id) if tenant_id else []
+    lowered = f"{context} {message}".lower()
+    if extra_keywords and any(keyword.lower() in lowered for keyword in extra_keywords):
+        return {"intent": True, "confidence": 0.95, "category": "custom", "reason": "tenant-configured lead trigger matched"}
     if not _client:
-        return _fallback_intent(message, context)
+        return _fallback_intent(message, context, extra_keywords)
     try:
         response = _client.chat.completions.create(model=settings.openai_chat_model, messages=[{"role": "system", "content": _INTENT_PROMPT}, {"role": "user", "content": json.dumps({"latest_message": message, "recent_context": context[-4000:]})}], temperature=0, response_format={"type": "json_object"})
         value = json.loads(response.choices[0].message.content or "{}")
         return {"intent": bool(value.get("intent")), "confidence": float(value.get("confidence", 0)), "category": str(value.get("category", "general"))[:80], "reason": str(value.get("reason", ""))[:300]}
     except Exception:
         logger.exception("Lead intent analysis failed; using fallback classifier")
-        return _fallback_intent(message, context)
+        return _fallback_intent(message, context, extra_keywords)
 
 
 def summarize_lead(name: str, interested_in: str, context: str = "") -> str:
@@ -124,3 +136,19 @@ def list_leads(tenant_id: str | None = None, limit: int = 50, offset: int = 0):
 def get_lead(lead_id: str):
     with db._get_pool().connection() as connection:
         return connection.execute("SELECT * FROM leads WHERE id=%s", (lead_id,)).fetchone()
+
+
+def list_keywords(tenant_id: str):
+    with db._get_pool().connection() as connection:
+        return connection.execute('SELECT * FROM lead_capture_keywords WHERE tenant_id=%s ORDER BY keyword', (tenant_id,)).fetchall()
+
+
+def replace_keywords(tenant_id: str, keywords: list[str]):
+    cleaned = sorted({keyword.strip().lower() for keyword in keywords if keyword and keyword.strip()})
+    stamp = db.now()
+    with db._get_pool().connection() as connection:
+        with connection.transaction():
+            connection.execute('DELETE FROM lead_capture_keywords WHERE tenant_id=%s', (tenant_id,))
+            with connection.cursor() as cursor:
+                cursor.executemany('INSERT INTO lead_capture_keywords (id,tenant_id,keyword,created_at) VALUES (%s,%s,%s,%s)', [(secrets.token_urlsafe(18), tenant_id, keyword, stamp) for keyword in cleaned])
+    return list_keywords(tenant_id)
