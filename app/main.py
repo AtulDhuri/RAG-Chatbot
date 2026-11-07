@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
-from fastapi import FastAPI, Request, Depends, HTTPException, Query
+from fastapi import FastAPI, Request, Depends, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -64,6 +64,12 @@ def normalize_domain(raw):
     return raw.strip().lower().removeprefix('https://').removeprefix('http://').removeprefix('www.').split('/')[0]
 
 def admin(request:Request): auth.require_admin(request)
+
+def record_exchange_background(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url):
+    try:
+        portal.record_exchange(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url)
+    except Exception:
+        logger.exception('Analytics recording failed')
 
 @app.get('/health')
 def health(): return {'status':'ok'}
@@ -136,12 +142,11 @@ def authorized_bot(request:Request):
     return {'id':entry['chatbot_id'],'allowed_domain':origin}
 @app.post('/api/chat')
 @limiter.limit(settings.chat_rate_limit)
-def chat(request:Request,req:ChatRequest,bot=Depends(authorized_bot)):
+def chat(request:Request,req:ChatRequest,background_tasks:BackgroundTasks,bot=Depends(authorized_bot)):
     kb=db.knowledge(bot['id'])
     if not kb or kb['knowledge_status']!='ready' or not vectorstore.is_indexed(bot['id']):return {'answer':"This site's knowledge base is not ready yet. Please try again shortly.",'sources':[],'status':'indexing'}
     result=rag.answer(bot['id'],req.message)
-    try: portal.record_exchange(bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered',request.headers.get('referer'))
-    except Exception: logger.exception('Analytics recording failed')
+    background_tasks.add_task(record_exchange_background,bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered',request.headers.get('referer'))
     return {'answer':result['answer'],'sources':result['sources'],'status':'ready'}
 @app.post('/api/chat/lead-intent')
 @limiter.limit(settings.chat_rate_limit)
@@ -156,15 +161,16 @@ def create_lead(request:Request,req:LeadRequest,bot=Depends(authorized_bot)):
     return {'success':True,'lead':dict(lead)}
 @app.post('/api/chat/stream')
 @limiter.limit(settings.chat_rate_limit)
-def chat_stream(request:Request,req:ChatRequest,bot=Depends(authorized_bot)):
+def chat_stream(request:Request,req:ChatRequest,background_tasks:BackgroundTasks,bot=Depends(authorized_bot)):
+    conversation_id=req.conversation_id or secrets.token_urlsafe(18)
+    source_page_url=request.headers.get('referer')
     def events():
-        conversation_id=req.conversation_id or secrets.token_urlsafe(18); answer_parts=[]; sources=[]; answer_status='answered'
+        answer_parts=[]; sources=[]
         for event in rag.stream_answer(bot['id'],req.message):
             if event.get('type')=='token': answer_parts.append(event.get('text',''))
             if event.get('type')=='final': sources=event.get('sources',[])
             yield f"data: {json.dumps(event)}\n\n"
-        try: portal.record_exchange(bot['id'],conversation_id,req.message,''.join(answer_parts),sources,answer_status,request.headers.get('referer'))
-        except Exception: logger.exception('Analytics recording failed')
+        background_tasks.add_task(record_exchange_background,bot['id'],conversation_id,req.message,''.join(answer_parts),sources,'answered',source_page_url)
         yield 'data: [DONE]\n\n'
     return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 @app.get('/api/status')
