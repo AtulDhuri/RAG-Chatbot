@@ -53,7 +53,5 @@ def validate(request, chatbot_id: str, current_domain: str):
     now=datetime.now(timezone.utc)
     try: end=datetime.fromisoformat(entry['expires_at']); end=end if end.tzinfo else end.replace(tzinfo=timezone.utc)
     except (TypeError,ValueError): _not_allowed(request,chatbot_id,'expired_subscription','invalid expiry',domain)
-    if entry.get('knowledge_status')!='ready':
-        invalidate(chatbot_id,domain); _not_allowed(request,chatbot_id,'knowledge_unavailable','knowledge base is not ready',domain)
     if end < now: invalidate(chatbot_id,domain); _not_allowed(request,chatbot_id,'expired_subscription','expired',domain)
     return entry

@@ -47,17 +47,21 @@ def session(token: str):
 def create_conversation(tenant_id: str, conversation_id: str | None = None, visitor_id: str | None = None, source_page_url: str | None = None):
     conversation_id = conversation_id or secrets.token_urlsafe(18); stamp = db.now()
     with db._get_pool().connection() as c:
-        with c.transaction(): c.execute("INSERT INTO chat_conversations (id,tenant_id,visitor_id,source_page_url,started_at,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING", (conversation_id,tenant_id,visitor_id,source_page_url,stamp,stamp,stamp))
+        with c.transaction():
+            existing=c.execute('SELECT tenant_id FROM chat_conversations WHERE id=%s FOR UPDATE',(conversation_id,)).fetchone()
+            if existing and existing['tenant_id'] != tenant_id:
+                conversation_id=secrets.token_urlsafe(18)
+            c.execute("INSERT INTO chat_conversations (id,tenant_id,visitor_id,source_page_url,started_at,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING", (conversation_id,tenant_id,visitor_id,source_page_url,stamp,stamp,stamp))
     return conversation_id
 
 def record_exchange(tenant_id: str, conversation_id: str, question: str, answer: str, sources=None, answer_status='answered', source_page_url=None):
     now = db.now(); question_id = secrets.token_urlsafe(18); answer_id = secrets.token_urlsafe(18); analytics_id = secrets.token_urlsafe(18); sources_json=json.dumps(sources or [])
-    create_conversation(tenant_id,conversation_id,source_page_url=source_page_url)
+    conversation_id=create_conversation(tenant_id,conversation_id,source_page_url=source_page_url)
     with db._get_pool().connection() as c:
         with c.transaction():
             c.execute("INSERT INTO chat_messages (id,conversation_id,tenant_id,role,content,source_urls,answer_status,created_at) VALUES (%s,%s,%s,'visitor',%s,'[]',NULL,%s),(%s,%s,%s,'assistant',%s,%s,%s,%s)", (question_id,conversation_id,tenant_id,question,now,answer_id,conversation_id,tenant_id,answer,sources_json,answer_status,now))
             c.execute("INSERT INTO chat_analytics (id,tenant_id,conversation_id,message_id,source_page_url,question,answer_status,fallback_used,normalized_question,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (analytics_id,tenant_id,conversation_id,answer_id,source_page_url,question,answer_status,answer_status != 'answered',' '.join(question.lower().split()),now))
-            c.execute("UPDATE chat_conversations SET message_count=message_count+2,updated_at=%s WHERE id=%s", (now,conversation_id))
+            c.execute("UPDATE chat_conversations SET message_count=message_count+2,updated_at=%s WHERE id=%s AND tenant_id=%s", (now,conversation_id,tenant_id))
             if source_page_url: c.execute("INSERT INTO page_analytics (id,tenant_id,page_url,conversations_started,question_count,last_seen_at,created_at,updated_at) VALUES (%s,%s,%s,1,1,%s,%s,%s) ON CONFLICT (tenant_id,page_url) DO UPDATE SET question_count=page_analytics.question_count+1,last_seen_at=EXCLUDED.last_seen_at,updated_at=EXCLUDED.updated_at", (secrets.token_urlsafe(18),tenant_id,source_page_url,now,now,now))
     return analytics_id
 

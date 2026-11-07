@@ -32,11 +32,15 @@ def _prepare(chatbot_id,question):
     if not hits:return {'answer':"I don't have any indexed content for this site yet, so I can't answer that right now.",'sources':[]},version,[]
     return None,version,hits
 
+def _cache_answer(chatbot_id,version,question,result):
+    try: answer_cache.set(chatbot_id,version,question,result)
+    except Exception: logger.exception('Answer cache write failed')
+
 def answer(chatbot_id,question):
     cached,version,hits=_prepare(chatbot_id,question)
     if cached:return cached
     if not hits:return {'answer':"I don't have any indexed content for this site yet, so I can't answer that right now.",'sources':[]}
-    result={'answer':_chat(_messages(question,hits)).strip(),'sources':_sources(hits)}; answer_cache.set(chatbot_id,version,question,result); return result
+    result={'answer':_chat(_messages(question,hits)).strip(),'sources':_sources(hits)}; _cache_answer(chatbot_id,version,question,result); return result
 
 def stream_answer(chatbot_id,question):
     cached,version,hits=_prepare(chatbot_id,question)
@@ -49,4 +53,4 @@ def stream_answer(chatbot_id,question):
     for item in response:
         text=item.choices[0].delta.content or ''
         if text: parts.append(text); yield {'type':'token','text':text}
-    result={'answer':''.join(parts).strip(),'sources':_sources(hits)}; answer_cache.set(chatbot_id,version,question,result); yield {'type':'final','sources':result['sources']}
+    result={'answer':''.join(parts).strip(),'sources':_sources(hits)}; _cache_answer(chatbot_id,version,question,result); yield {'type':'final','sources':result['sources']}

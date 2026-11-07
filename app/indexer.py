@@ -116,9 +116,10 @@ def _run(chatbot_id: str, domain: str, force: bool = False):
         if chunks == 0:
             raise RuntimeError(f"No content chunks generated for {domain}")
 
-        # All target-version batches are present before making the new version visible.
-        db.update_knowledge(chatbot_id, knowledge_base_version=target_version, knowledge_status="ready", crawl_status="READY", pages_crawled=len(stored_pages), total_chunks=chunks, total_tokens=total_tokens, content_hash=digest, last_crawled_at=db.now(), crawl_completed_at=db.now(), embedding_provider=_settings.openai_embedding_model, source_provider=provider)
+        # Publish only after all target-version batches are present. Marking the
+        # metadata ready first could expose a version before its vectors exist.
         vectorstore.get_vector_store().publish_version(chatbot_id, target_version, previous_version)
+        db.update_knowledge(chatbot_id, knowledge_base_version=target_version, knowledge_status="ready", crawl_status="READY", pages_crawled=len(stored_pages), total_chunks=chunks, total_tokens=total_tokens, content_hash=digest, last_crawled_at=db.now(), crawl_completed_at=db.now(), embedding_provider=_settings.openai_embedding_model, source_provider=provider)
         db.finish_ingestion_run(run_id)
         _set(chatbot_id, phase="ready", pages_done=len(stored_pages), pages_known=len(stored_pages), chunks=chunks)
     except Exception as exc:

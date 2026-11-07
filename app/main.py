@@ -145,7 +145,11 @@ def authorized_bot(request:Request):
 def chat(request:Request,req:ChatRequest,background_tasks:BackgroundTasks,bot=Depends(authorized_bot)):
     kb=db.knowledge(bot['id'])
     if not kb or kb['knowledge_status']!='ready' or not vectorstore.is_indexed(bot['id']):return {'answer':"This site's knowledge base is not ready yet. Please try again shortly.",'sources':[],'status':'indexing'}
-    result=rag.answer(bot['id'],req.message)
+    try:
+        result=rag.answer(bot['id'],req.message)
+    except Exception:
+        logger.exception('Chat answer failed for %s',bot['id'])
+        return {'answer':'I\'m having trouble answering right now. Please try again in a moment.','sources':[],'status':'error'}
     background_tasks.add_task(record_exchange_background,bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered',request.headers.get('referer'))
     return {'answer':result['answer'],'sources':result['sources'],'status':'ready'}
 @app.post('/api/chat/lead-intent')
@@ -165,12 +169,17 @@ def chat_stream(request:Request,req:ChatRequest,background_tasks:BackgroundTasks
     conversation_id=req.conversation_id or secrets.token_urlsafe(18)
     source_page_url=request.headers.get('referer')
     def events():
-        answer_parts=[]; sources=[]
-        for event in rag.stream_answer(bot['id'],req.message):
-            if event.get('type')=='token': answer_parts.append(event.get('text',''))
-            if event.get('type')=='final': sources=event.get('sources',[])
-            yield f"data: {json.dumps(event)}\n\n"
-        background_tasks.add_task(record_exchange_background,bot['id'],conversation_id,req.message,''.join(answer_parts),sources,'answered',source_page_url)
+        answer_parts=[]; sources=[]; answer_status='answered'
+        try:
+            for event in rag.stream_answer(bot['id'],req.message):
+                if event.get('type')=='token': answer_parts.append(event.get('text',''))
+                if event.get('type')=='final': sources=event.get('sources',[])
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception:
+            answer_status='error'
+            logger.exception('Streaming chat answer failed for %s',bot['id'])
+            yield f"data: {json.dumps({'type':'error','message':'I\'m having trouble answering right now. Please try again in a moment.'})}\n\n"
+        background_tasks.add_task(record_exchange_background,bot['id'],conversation_id,req.message,''.join(answer_parts),sources,answer_status,source_page_url)
         yield 'data: [DONE]\n\n'
     return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 @app.get('/api/status')

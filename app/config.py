@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     smtp_tls: bool = True
     lead_notification_email: str = "dineossite@gmail.com"
     widget_validation_cache_ttl_seconds: int = 300
+    answer_cache_ttl_seconds: int = 300
 
     @property
     def origins_list(self) -> list[str]:
