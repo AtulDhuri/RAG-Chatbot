@@ -4,9 +4,8 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
-    # Run schema migrations once before the new web process starts. Do not run
-    # DDL from the application lifespan because overlapping web instances can
-    # deadlock while acquiring PostgreSQL relation locks.
+    # Run schema migrations before the new web process starts. The application
+    # also repeats this idempotent migration at startup as a safety net.
     preDeployCommand: python -m app.migrate
     healthCheckPath: /health
     # The container listens on $PORT, which Render injects automatically.

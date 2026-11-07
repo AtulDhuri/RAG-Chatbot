@@ -22,8 +22,11 @@ settings=get_settings(); limiter=Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(application):
-    # Schema migrations run in Render's preDeployCommand, not in every web
-    # process. Keeping startup read-only avoids DDL deadlocks during deploys.
+    # Render runs this through preDeployCommand, but running the idempotent
+    # migration here as well keeps manually created services and restarts from
+    # serving requests against an uninitialized database. init_db() uses a
+    # PostgreSQL advisory transaction lock so concurrent processes serialize.
+    db.init_db()
     start_subscription_sync()
     yield
     db.close_pool()
@@ -88,8 +91,13 @@ def portal_user(request:Request):
     return result
 @app.post('/api/admin/chatbots/{chatbot_id}/portal-credentials',dependencies=[Depends(admin)])
 def create_portal_credentials(chatbot_id:str,req:PortalCredentialRequest):
-    if not db.get_chatbot(chatbot_id): raise HTTPException(404,'Chatbot not found')
-    try: return dict(portal.create_credentials(chatbot_id,req.password))
+    bot=db.get_chatbot(chatbot_id)
+    if not bot: raise HTTPException(404,'Chatbot not found')
+    try:
+        credential=portal.create_credentials(chatbot_id,req.password)
+        portal_url=(settings.public_base_url or '').rstrip('/')+'/portal'
+        email_sent=lead_capture.send_portal_credentials_email(bot['email'],credential['client_id'],req.password,portal_url)
+        return {'success':True,'client_id':credential['client_id'],'portal_url':portal_url,'email_sent':email_sent}
     except ValueError as exc: raise HTTPException(422,str(exc))
 @app.get('/api/portal/dashboard')
 def portal_dashboard(request:Request,user=Depends(portal_user)): return portal.dashboard(user['tenant_id'])
@@ -199,11 +207,15 @@ def create_chatbot(req:ChatbotRequest, crawl:bool=False):
     data=req.model_dump(); portal_password=data.pop('portal_password',None)
     if portal_password and len(portal_password)<10: raise HTTPException(422,'Portal password must contain at least 10 characters')
     data['allowed_domain']=normalize_domain(data['allowed_domain']); data['website_url']=data['website_url'].strip(); cid=db.create_chatbot(data)
+    portal_email_sent=False
     if portal_password:
-        try: portal.create_credentials(cid,portal_password)
+        try:
+            credential=portal.create_credentials(cid,portal_password)
+            portal_url=(settings.public_base_url or '').rstrip('/')+'/portal'
+            portal_email_sent=lead_capture.send_portal_credentials_email(data['email'],credential['client_id'],portal_password,portal_url)
         except ValueError as exc: raise HTTPException(422,str(exc))
     if crawl:indexer.ensure_indexed(cid,data['website_url'] or data['allowed_domain'],force=True)
-    return {'chatbot_id':cid,'status':'started' if crawl else 'pending','install_code':f'<script src="{settings.public_base_url or ""}/chatbot.js?v=portal-analytics-1" data-chatbot-id="{cid}" defer></script>'}
+    return {'chatbot_id':cid,'status':'started' if crawl else 'pending','install_code':f'<script src="{settings.public_base_url or ""}/chatbot.js?v=portal-analytics-1" data-chatbot-id="{cid}" defer></script>','portal_email_sent':portal_email_sent}
 @app.get('/api/admin/leads',dependencies=[Depends(admin)])
 def admin_leads(tenant_id:str='',limit:int=Query(50,ge=1,le=200),offset:int=Query(0,ge=0)):
     return {'items':[dict(row) for row in lead_capture.list_leads(tenant_id or None,limit,offset)]}

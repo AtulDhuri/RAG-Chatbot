@@ -93,6 +93,38 @@ def create_lead(tenant_id: str, conversation_id: str | None, name: str, email: s
     return lead
 
 
+def send_portal_credentials_email(recipient: str, client_id: str, password: str, portal_url: str) -> bool:
+    if not recipient:
+        logger.warning("Portal credential email skipped because the client has no email")
+        return False
+    host = getattr(settings, "smtp_host", "")
+    if not host:
+        logger.warning("Portal credential email skipped because SMTP_HOST is not configured")
+        return False
+    message = EmailMessage()
+    message["Subject"] = "Your DineOS Client Portal Login"
+    message["To"] = recipient
+    message["From"] = getattr(settings, "smtp_from", "") or recipient
+    message.set_content(
+        f"Your DineOS client portal is ready.\n\n"
+        f"Portal link: {portal_url}\n"
+        f"Client ID: {client_id}\n"
+        f"Password: {password}\n\n"
+        "Keep these login details private."
+    )
+    try:
+        with smtplib.SMTP(host, int(getattr(settings, "smtp_port", 587)), timeout=10) as smtp:
+            if getattr(settings, "smtp_tls", True): smtp.starttls()
+            username = getattr(settings, "smtp_username", "")
+            smtp_password = getattr(settings, "smtp_password", "")
+            if username: smtp.login(username, smtp_password)
+            smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Portal credential email failed for %s", recipient)
+        return False
+
+
 def notify_lead(lead) -> bool:
     configuration = get_settings_for_tenant(lead["tenant_id"])
     if configuration and not configuration["enabled"]:
