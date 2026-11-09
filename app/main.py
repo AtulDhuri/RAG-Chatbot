@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from .config import get_settings
 from .extractor import ContextDevExtractor
-from . import auth, db, indexer, rag, vectorstore, widget_cache, lead_capture, portal
+from . import auth, db, indexer, rag, vectorstore, widget_cache, lead_capture, portal, retention
 from .subscription_sync import start as start_subscription_sync
 from .security import validate_chatbot, reject
 
@@ -28,6 +28,7 @@ async def lifespan(application):
     # PostgreSQL advisory transaction lock so concurrent processes serialize.
     db.init_db()
     start_subscription_sync()
+    retention.start()
     yield
     db.close_pool()
 
@@ -46,9 +47,11 @@ class InitRequest(BaseModel): chatbot_id:str=Field(...,min_length=1,max_length=1
 class WidgetValidateRequest(BaseModel): chatbot_id:str=Field(...,min_length=1,max_length=100); current_domain:str=Field(...,min_length=1,max_length=255); widget_version:str=Field(...,min_length=1,max_length=40)
 class PortalLoginRequest(BaseModel): client_id:str=Field(...,min_length=1,max_length=120); password:str=Field(...,min_length=1,max_length=200)
 class PortalCredentialRequest(BaseModel): password:str=Field(...,min_length=10,max_length=200)
-class ChatRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); conversation_id:str|None=Field(None,max_length=120)
+class ChatRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); conversation_id:str|None=Field(None,max_length=120); visitor_id:str|None=Field(None,max_length=120)
 class LeadIntentRequest(BaseModel): message:str=Field(...,min_length=1,max_length=2000); context:str=''; conversation_id:str|None=Field(None,max_length=120)
-class LeadRequest(BaseModel): conversation_id:str|None=Field(None,max_length=120); name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); phone:str=Field(...,min_length=1,max_length=80); interested_in:str=Field(...,min_length=1,max_length=1000); context:str=''
+class LeadRequest(BaseModel): conversation_id:str|None=Field(None,max_length=120); name:str=Field(...,min_length=1,max_length=160); email:str=Field(...,min_length=3,max_length=254); phone:str=Field(...,min_length=1,max_length=80); company:str=Field('',max_length=160); interested_in:str=Field(...,min_length=1,max_length=1000); context:str=''
+class LeadUpdateRequest(BaseModel): status:str|None=Field(None,pattern='^(new|contacted|qualified|closed|lost)$'); company:str|None=Field(None,max_length=160)
+class UnansweredUpdateRequest(BaseModel): status:str=Field(...,pattern='^(open|reviewed|resolved)$')
 class LeadSettingsRequest(BaseModel): enabled:bool=True; notification_email:str=Field(...,min_length=3,max_length=254)
 class LeadKeywordsRequest(BaseModel): keywords:list[str]=Field(default_factory=list, max_length=50)
 class AdminLoginRequest(BaseModel): api_key:str=Field(...,min_length=1)
@@ -65,9 +68,9 @@ def normalize_domain(raw):
 
 def admin(request:Request): auth.require_admin(request)
 
-def record_exchange_background(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url):
+def record_exchange_background(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url, visitor_id=None):
     try:
-        portal.record_exchange(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url)
+        portal.record_exchange(tenant_id, conversation_id, question, answer, sources, answer_status, source_page_url, visitor_id)
     except Exception:
         logger.exception('Analytics recording failed')
 
@@ -106,28 +109,60 @@ def create_portal_credentials(chatbot_id:str,req:PortalCredentialRequest):
         return {'success':True,'client_id':credential['client_id'],'portal_url':portal_url,'email_sent':email_sent}
     except ValueError as exc: raise HTTPException(422,str(exc))
 @app.get('/api/portal/dashboard')
-def portal_dashboard(request:Request,user=Depends(portal_user)): return portal.dashboard(user['tenant_id'])
+def portal_dashboard(request:Request,date_from:str|None=None,date_to:str|None=None,user=Depends(portal_user)):
+    try:return portal.dashboard(user['tenant_id'],date_from,date_to)
+    except ValueError as exc:raise HTTPException(422,str(exc))
 @app.get('/api/portal/conversations')
-def portal_conversations(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),user=Depends(portal_user)): return {'items':[dict(x) for x in portal.conversations(user['tenant_id'],limit,offset)]}
+def portal_conversations(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),date_from:str|None=None,date_to:str|None=None,search:str='',lead_status:str='',user=Depends(portal_user)):
+    try:return {'items':[dict(x) for x in portal.conversations(user['tenant_id'],limit,offset,date_from,date_to,search,lead_status)]}
+    except ValueError as exc:raise HTTPException(422,str(exc))
 @app.get('/api/portal/conversations/{conversation_id}')
 def portal_conversation(conversation_id:str,request:Request,user=Depends(portal_user)):
     result=portal.conversation(user['tenant_id'],conversation_id)
-    if not result: raise HTTPException(404,'Conversation not found')
+    if not result: raise HTTPException(404,'Conversation not found or expired')
     return result
 @app.get('/api/portal/questions/most-asked')
-def portal_most_asked(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.most_asked(user['tenant_id'])]}
+def portal_most_asked(request:Request,limit:int=Query(50,ge=1,le=100),date_from:str|None=None,date_to:str|None=None,search:str='',user=Depends(portal_user)):
+    try:return {'items':[dict(x) for x in portal.most_asked(user['tenant_id'],limit,date_from,date_to,search)]}
+    except ValueError as exc:raise HTTPException(422,str(exc))
 @app.get('/api/portal/questions/unanswered')
-def portal_unanswered(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.unanswered(user['tenant_id'])]}
+def portal_unanswered(request:Request,limit:int=Query(50,ge=1,le=100),date_from:str|None=None,date_to:str|None=None,search:str='',status:str='',user=Depends(portal_user)):
+    try:return {'items':[dict(x) for x in portal.unanswered(user['tenant_id'],limit,date_from,date_to,search,status)]}
+    except ValueError as exc:raise HTTPException(422,str(exc))
+@app.patch('/api/portal/questions/unanswered/{question_id}')
+def portal_update_unanswered(question_id:str,req:UnansweredUpdateRequest,request:Request,user=Depends(portal_user)):
+    result=portal.update_unanswered(user['tenant_id'],question_id,req.status)
+    if not result:raise HTTPException(404,'Unanswered question not found')
+    return dict(result)
 @app.get('/api/portal/topics')
-def portal_topics(request:Request,user=Depends(portal_user)): return {'items':[dict(x) for x in portal.topics(user['tenant_id'])]}
+def portal_topics(request:Request,date_from:str|None=None,date_to:str|None=None,user=Depends(portal_user)):
+    try:return {'items':[dict(x) for x in portal.topics(user['tenant_id'],date_from,date_to)]}
+    except ValueError as exc:raise HTTPException(422,str(exc))
+@app.get('/api/portal/pages')
+def portal_pages(request:Request,user=Depends(portal_user)):return {'items':[dict(x) for x in portal.page_analytics(user['tenant_id'])]}
 @app.get('/api/portal/leads')
-def portal_leads(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),user=Depends(portal_user)): return {'items':[dict(x) for x in lead_capture.list_leads(user['tenant_id'],limit,offset)]}
+def portal_leads(request:Request,limit:int=Query(50,ge=1,le=100),offset:int=Query(0,ge=0),date_from:str|None=None,date_to:str|None=None,status:str='',score:str='',search:str='',user=Depends(portal_user)):
+    try:
+        start,end=portal._range_bounds(date_from,date_to)
+        items=lead_capture.list_leads(user['tenant_id'],limit,offset,start,end,status,score,search)
+    except ValueError as exc: raise HTTPException(422,str(exc))
+    return {'items':[dict(x) for x in items]}
+@app.patch('/api/portal/leads/{lead_id}')
+def portal_update_lead(lead_id:str,req:LeadUpdateRequest,request:Request,user=Depends(portal_user)):
+    result=portal.update_lead(user['tenant_id'],lead_id,req.model_dump(exclude_none=True))
+    if not result:raise HTTPException(404,'Lead not found')
+    return dict(result)
 @app.get('/api/portal/leads/{lead_id}')
 def portal_lead(lead_id:str,request:Request,user=Depends(portal_user)):
     lead=lead_capture.get_lead(lead_id)
     if not lead or lead['tenant_id'] != user['tenant_id']: raise HTTPException(404,'Lead not found')
     details=dict(lead); details['conversation']=portal.conversation(user['tenant_id'],lead['conversation_id']) if lead['conversation_id'] else None
     return details
+@app.get('/api/portal/leads.csv')
+def portal_leads_csv(request:Request,user=Depends(portal_user)):
+    rows=lead_capture.list_leads(user['tenant_id'],10000,0)
+    output=io.StringIO(); fields=['created_at','name','email','phone','company','lead_score_label','lead_score','status','interested_in','lead_summary']; writer=csv.DictWriter(output,fieldnames=fields); writer.writeheader(); writer.writerows([{field:row.get(field,'') for field in fields} for row in rows])
+    return StreamingResponse(iter([output.getvalue()]),media_type='text/csv',headers={'Content-Disposition':'attachment; filename=leads.csv'})
 @app.post('/api/portal/logout')
 def portal_logout(): return {'success':True}
 @app.post('/api/chat/init')
@@ -150,7 +185,7 @@ def chat(request:Request,req:ChatRequest,background_tasks:BackgroundTasks,bot=De
     except Exception:
         logger.exception('Chat answer failed for %s',bot['id'])
         return {'answer':'I\'m having trouble answering right now. Please try again in a moment.','sources':[],'status':'error'}
-    background_tasks.add_task(record_exchange_background,bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered',request.headers.get('referer'))
+    background_tasks.add_task(record_exchange_background,bot['id'],req.conversation_id or secrets.token_urlsafe(18),req.message,result['answer'],result.get('sources',[]),'answered' if result.get('sources') else 'unanswered',request.headers.get('referer'),req.visitor_id)
     return {'answer':result['answer'],'sources':result['sources'],'status':'ready'}
 @app.post('/api/chat/lead-intent')
 @limiter.limit(settings.chat_rate_limit)
@@ -161,7 +196,7 @@ def lead_intent(request:Request,req:LeadIntentRequest,bot=Depends(authorized_bot
 @limiter.limit('10/minute')
 def create_lead(request:Request,req:LeadRequest,bot=Depends(authorized_bot)):
     if not req.email or '@' not in req.email: raise HTTPException(422,'Valid email is required')
-    lead=lead_capture.create_lead(bot['id'],req.conversation_id,req.name.strip(),req.email.strip(),req.phone.strip(),req.interested_in.strip(),req.context)
+    lead=lead_capture.create_lead(bot['id'],req.conversation_id,req.name.strip(),req.email.strip(),req.phone.strip(),req.interested_in.strip(),req.context,req.company.strip())
     return {'success':True,'lead':dict(lead)}
 @app.post('/api/chat/stream')
 @limiter.limit(settings.chat_rate_limit)
@@ -179,7 +214,9 @@ def chat_stream(request:Request,req:ChatRequest,background_tasks:BackgroundTasks
             answer_status='error'
             logger.exception('Streaming chat answer failed for %s',bot['id'])
             yield f"data: {json.dumps({'type':'error','message':'I\'m having trouble answering right now. Please try again in a moment.'})}\n\n"
-        background_tasks.add_task(record_exchange_background,bot['id'],conversation_id,req.message,''.join(answer_parts),sources,answer_status,source_page_url)
+        if answer_status == 'answered' and not sources:
+            answer_status = 'unanswered'
+        background_tasks.add_task(record_exchange_background,bot['id'],conversation_id,req.message,''.join(answer_parts),sources,answer_status,source_page_url,req.visitor_id)
         yield 'data: [DONE]\n\n'
     return StreamingResponse(events(),media_type='text/event-stream',headers={'Cache-Control':'no-cache','X-Accel-Buffering':'no'})
 @app.get('/api/status')

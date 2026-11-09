@@ -1,9 +1,9 @@
 """PostgreSQL repository for chatbot administration, knowledge, and vector metadata."""
 from __future__ import annotations
 import hashlib, secrets, time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
 import hashlib, secrets, time
 from psycopg.rows import dict_row
@@ -43,8 +43,21 @@ SCHEMA_STATEMENTS = [
 "CREATE INDEX IF NOT EXISTS security_logs_chatbot_idx ON security_logs(chatbot_id, created_at)",
 """CREATE TABLE IF NOT EXISTS lead_capture_settings (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, enabled BOOLEAN NOT NULL DEFAULT TRUE, notification_email TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
 "CREATE UNIQUE INDEX IF NOT EXISTS lead_capture_settings_tenant_uidx ON lead_capture_settings(tenant_id)",
-"""CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, conversation_id TEXT, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL, interested_in TEXT NOT NULL, lead_summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','notified')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"""CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, conversation_id TEXT, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL, company TEXT NOT NULL DEFAULT '', interested_in TEXT NOT NULL, lead_summary TEXT NOT NULL, lead_score INTEGER NOT NULL DEFAULT 0 CHECK(lead_score BETWEEN 0 AND 100), lead_score_label TEXT NOT NULL DEFAULT 'cold' CHECK(lead_score_label IN ('hot','warm','cold')), lead_category TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','contacted','qualified','closed','lost')), notification_status TEXT NOT NULL DEFAULT 'pending' CHECK(notification_status IN ('pending','sent','failed')), notified_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS company TEXT NOT NULL DEFAULT ''",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_score INTEGER NOT NULL DEFAULT 0",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_score_label TEXT NOT NULL DEFAULT 'cold'",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_category TEXT NOT NULL DEFAULT ''",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS notification_status TEXT NOT NULL DEFAULT 'pending'",
+"ALTER TABLE leads ADD COLUMN IF NOT EXISTS notified_at TEXT",
+"UPDATE leads SET status='new', notification_status='sent' WHERE status='notified'",
+"ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_status_check",
+"ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_score_check",
+"ALTER TABLE leads ADD CONSTRAINT leads_status_check CHECK(status IN ('new','contacted','qualified','closed','lost'))",
+"ALTER TABLE leads ADD CONSTRAINT leads_score_check CHECK(lead_score BETWEEN 0 AND 100)",
 "CREATE INDEX IF NOT EXISTS leads_tenant_created_idx ON leads(tenant_id, created_at DESC)",
+"CREATE INDEX IF NOT EXISTS leads_tenant_status_idx ON leads(tenant_id, status, created_at DESC)",
+"CREATE INDEX IF NOT EXISTS leads_tenant_score_idx ON leads(tenant_id, lead_score_label, created_at DESC)",
 "CREATE INDEX IF NOT EXISTS leads_conversation_idx ON leads(tenant_id, conversation_id)",
 """CREATE TABLE IF NOT EXISTS portal_credentials (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, client_id TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
 "CREATE UNIQUE INDEX IF NOT EXISTS portal_credentials_tenant_uidx ON portal_credentials(tenant_id)",
@@ -57,6 +70,9 @@ SCHEMA_STATEMENTS = [
 "CREATE INDEX IF NOT EXISTS chat_messages_conversation_idx ON chat_messages(conversation_id, created_at)",
 "CREATE INDEX IF NOT EXISTS chat_messages_tenant_created_idx ON chat_messages(tenant_id, created_at DESC)",
 """CREATE TABLE IF NOT EXISTS chat_analytics (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE, conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE, message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL, source_page_url TEXT, question TEXT NOT NULL, answer_status TEXT NOT NULL, confidence_score NUMERIC, fallback_used BOOLEAN NOT NULL DEFAULT FALSE, lead_created BOOLEAN NOT NULL DEFAULT FALSE, topic TEXT, normalized_question TEXT, created_at TEXT NOT NULL)""",
+"ALTER TABLE chat_analytics ALTER COLUMN conversation_id DROP NOT NULL",
+"ALTER TABLE chat_analytics DROP CONSTRAINT IF EXISTS chat_analytics_conversation_id_fkey",
+"ALTER TABLE chat_analytics ADD CONSTRAINT chat_analytics_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES chat_conversations(id) ON DELETE SET NULL",
 "CREATE INDEX IF NOT EXISTS chat_analytics_tenant_created_idx ON chat_analytics(tenant_id, created_at DESC)",
 "CREATE INDEX IF NOT EXISTS chat_analytics_unanswered_idx ON chat_analytics(tenant_id, answer_status, created_at DESC)",
 "CREATE INDEX IF NOT EXISTS chat_analytics_page_idx ON chat_analytics(tenant_id, source_page_url)",
@@ -238,6 +254,16 @@ def sync_subscription_statuses():
             c.execute("UPDATE chatbots SET status='expired', updated_at=%s WHERE subscription_end_date < %s AND status <> 'suspended'",(current,current))
             c.execute("UPDATE chatbots SET status='active', updated_at=%s WHERE status='expired' AND subscription_start_date <= %s AND subscription_end_date >= %s",(current,current,current))
     return active_chatbots()
+
+
+def purge_expired_conversations(retention_days=14):
+    cutoff=(datetime.now(timezone.utc)-timedelta(days=retention_days)).isoformat()
+    with _get_pool().connection() as c:
+        with c.transaction():
+            c.execute("UPDATE leads SET conversation_id=NULL, updated_at=%s WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE started_at < %s)",(now(),cutoff))
+            deleted=c.execute("DELETE FROM chat_conversations WHERE started_at < %s RETURNING id",(cutoff,)).fetchall()
+            c.execute("UPDATE question_groups qg SET question_count=(SELECT count(*) FROM question_group_members m WHERE m.group_id=qg.id), updated_at=%s",(now(),))
+            return len(deleted)
 
 
 def close_pool() -> None:

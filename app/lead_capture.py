@@ -82,13 +82,26 @@ def save_settings(tenant_id: str, enabled: bool, notification_email: str):
                 RETURNING *""", (record_id, tenant_id, enabled, notification_email, stamp, stamp)).fetchone()
 
 
-def create_lead(tenant_id: str, conversation_id: str | None, name: str, email: str, phone: str, interested_in: str, context: str = ""):
+def _lead_score(interested_in: str) -> tuple[int, str]:
+    text=interested_in.lower()
+    hot=('demo','pricing','price','quote','buy','implementation','schedule','call')
+    warm=('interested','learn','information','details','contact')
+    score=85 if any(word in text for word in hot) else 60 if any(word in text for word in warm) else 35
+    return score, 'hot' if score >= 80 else 'warm' if score >= 50 else 'cold'
+
+
+def create_lead(tenant_id: str, conversation_id: str | None, name: str, email: str, phone: str, interested_in: str, context: str = "", company: str = ""):
     summary = summarize_lead(name, interested_in, context)
+    score, score_label = _lead_score(interested_in)
     lead_id = secrets.token_urlsafe(18); stamp = db.now()
     with db._get_pool().connection() as connection:
         with connection.transaction():
-            lead = connection.execute("""INSERT INTO leads (id, tenant_id, conversation_id, name, email, phone, interested_in, lead_summary, status, created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'new',%s,%s) RETURNING *""", (lead_id, tenant_id, conversation_id, name, email, phone, interested_in, summary, stamp, stamp)).fetchone()
+            lead = connection.execute("""INSERT INTO leads (id, tenant_id, conversation_id, name, email, phone, company, interested_in, lead_summary, lead_score, lead_score_label, lead_category, status, notification_status, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'new','pending',%s,%s) RETURNING *""", (lead_id, tenant_id, conversation_id, name, email, phone, company, interested_in, summary, score, score_label, interested_in[:80], stamp, stamp)).fetchone()
+            if conversation_id:
+                connection.execute("UPDATE chat_conversations SET lead_id=%s, updated_at=%s WHERE id=%s AND tenant_id=%s", (lead_id, stamp, conversation_id, tenant_id))
+                connection.execute("UPDATE chat_analytics SET lead_created=TRUE WHERE tenant_id=%s AND conversation_id=%s", (tenant_id, conversation_id))
+                connection.execute("UPDATE page_analytics SET leads_generated=leads_generated+1, updated_at=%s WHERE tenant_id=%s AND page_url=(SELECT source_page_url FROM chat_conversations WHERE id=%s AND tenant_id=%s)", (stamp, tenant_id, conversation_id, tenant_id))
     notify_lead(lead)
     return lead
 
@@ -150,19 +163,27 @@ def notify_lead(lead) -> bool:
             password = getattr(settings, "smtp_password", "")
             if username: smtp.login(username, password)
             smtp.send_message(message)
-        with db._get_pool().connection() as connection:
-            with connection.transaction(): connection.execute("UPDATE leads SET status='notified', updated_at=%s WHERE id=%s", (db.now(), lead["id"]))
+            with db._get_pool().connection() as connection:
+                with connection.transaction(): connection.execute("UPDATE leads SET notification_status='sent', notified_at=%s, updated_at=%s WHERE id=%s", (db.now(),db.now(),lead["id"]))
         return True
     except Exception:
+        with db._get_pool().connection() as connection:
+            with connection.transaction(): connection.execute("UPDATE leads SET notification_status='failed', updated_at=%s WHERE id=%s", (db.now(), lead["id"]))
         logger.exception("Lead notification failed for %s", lead["id"])
         return False
 
 
-def list_leads(tenant_id: str | None = None, limit: int = 50, offset: int = 0):
+def list_leads(tenant_id: str | None = None, limit: int = 50, offset: int = 0, date_from=None, date_to=None, status='', score='', search=''):
+    where=[]; args=[]
+    if tenant_id: where.append('tenant_id=%s'); args.append(tenant_id)
+    if date_from: where.append('created_at >= %s'); args.append(date_from)
+    if date_to: where.append('created_at < %s'); args.append(date_to)
+    if status: where.append('status=%s'); args.append(status)
+    if score: where.append('lead_score_label=%s'); args.append(score)
+    if search: where.append('(name ILIKE %s OR email ILIKE %s OR company ILIKE %s OR interested_in ILIKE %s)'); args.extend([f'%{search}%']*4)
+    clause=(' WHERE '+' AND '.join(where)) if where else ''
     with db._get_pool().connection() as connection:
-        if tenant_id:
-            return connection.execute("SELECT * FROM leads WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s OFFSET %s", (tenant_id, limit, offset)).fetchall()
-        return connection.execute("SELECT * FROM leads ORDER BY created_at DESC LIMIT %s OFFSET %s", (limit, offset)).fetchall()
+        return connection.execute('SELECT * FROM leads'+clause+' ORDER BY created_at DESC LIMIT %s OFFSET %s',args+[limit,offset]).fetchall()
 
 
 def get_lead(lead_id: str):
