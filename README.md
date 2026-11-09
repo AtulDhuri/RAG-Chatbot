@@ -13,6 +13,8 @@ Copy-Item .env.example .env
 # Set OPENAI_API_KEY, JWT_SECRET, and ADMIN_API_KEY in .env
 python -m app.migrate
 uvicorn app.main:app --port 8000
+
+python -m uvicorn app.main:app --port 8000
 ```
 
 Use PostgreSQL for all application metadata. `DATABASE_URL` is required and must point to the PostgreSQL instance used by the deployment. Render runs `python -m app.migrate` as a pre-deploy command, so schema changes finish before the web process starts. The web process does not perform DDL during lifespan startup. The application fails startup if the database URL is missing or is not a PostgreSQL URL. Embeddings and knowledge chunks are stored in Supabase PostgreSQL using `pgvector`. The application does not depend on ChromaDB or local vector files.

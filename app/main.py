@@ -224,7 +224,7 @@ def status(request:Request,bot=Depends(authorized_bot)):
     snap=indexer.get_progress(bot['id']); kb=db.knowledge(bot['id']); return {'chatbot_id':bot['id'],'phase':kb['knowledge_status'] if kb else snap['phase'],'indexing':snap['indexing'],'indexed':bool(kb and kb['knowledge_status']=='ready'),'pages_done':snap['pages_done'],'pages_known':snap['pages_known'],'chunks':snap['chunks'],'last_url':snap['last_url'],'knowledge_version':kb['knowledge_base_version'] if kb else 0,'crawl_metrics':snap.get('crawl_metrics',{}),'source_provider':kb['source_provider'] if kb else 'CONTEXT_DEV','crawl_status':kb['crawl_status'] if kb else 'PENDING','website_name':kb['website_name'] if kb else '','estimated_knowledge_size':kb['estimated_knowledge_size'] if kb else 'unknown','categories':json.loads(kb['categories'] or '[]') if kb else [],'pages_found':kb['pages_found'] if kb else 0,'last_analyzed_at':kb['last_analyzed_at'] if kb else None,'total_pages':kb['pages_crawled'] if kb else 0,'total_chunks':kb['total_chunks'] if kb else 0,'total_tokens':kb['total_tokens'] if kb else 0,'error_details':kb['error_details'] if kb else ''}
 
 @app.get('/portal')
-def portal_page(): return FileResponse(STATIC_DIR/'portal.html',media_type='text/html')
+def portal_page(): return FileResponse(STATIC_DIR/'portal.html',media_type='text/html',headers={'Cache-Control':'no-cache, no-store, must-revalidate'})
 @app.get('/leads')
 def leads_page():return FileResponse(STATIC_DIR/'leads.html',media_type='text/html')
 @app.get('/admin')

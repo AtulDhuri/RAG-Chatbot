@@ -9,15 +9,16 @@ def backfill_analytics() -> int:
     with db._get_pool().connection() as connection:
         with connection.transaction():
             rows = connection.execute(
-                "SELECT id, tenant_id, question, answer_status, created_at "
-                "FROM chat_analytics ORDER BY created_at, id"
+                "SELECT a.id, a.tenant_id, a.question, a.answer_status, a.created_at, m.content AS answer "
+                "FROM chat_analytics a LEFT JOIN chat_messages m ON m.id=a.message_id ORDER BY a.created_at, a.id"
             ).fetchall()
             for row in rows:
                 normalized = ' '.join(row['question'].lower().split())
                 topic = portal._topic_for(row['question'])
+                answer_status = 'unanswered' if "i don't have that information on the site" in (row['answer'] or '').lower() else row['answer_status']
                 connection.execute(
-                    "UPDATE chat_analytics SET normalized_question=%s, topic=%s WHERE id=%s",
-                    (normalized, topic, row['id']),
+                    "UPDATE chat_analytics SET normalized_question=%s, topic=%s, answer_status=%s, fallback_used=%s WHERE id=%s",
+                    (normalized, topic, answer_status, answer_status != 'answered', row['id']),
                 )
 
                 group = connection.execute(
@@ -40,7 +41,7 @@ def backfill_analytics() -> int:
                     (secrets.token_urlsafe(18), group['id'], row['id'], row['created_at']),
                 )
 
-                if row['answer_status'] != 'answered':
+                if answer_status != 'answered':
                     unanswered = connection.execute(
                         "SELECT id FROM unanswered_questions WHERE tenant_id=%s AND normalized_question=%s FOR UPDATE",
                         (row['tenant_id'], normalized),

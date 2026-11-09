@@ -72,6 +72,8 @@ def _topic_for(question: str) -> str:
 
 def record_exchange(tenant_id: str, conversation_id: str, question: str, answer: str, sources=None, answer_status='answered', source_page_url=None, visitor_id=None):
     now = db.now(); question_id = secrets.token_urlsafe(18); answer_id = secrets.token_urlsafe(18); analytics_id = secrets.token_urlsafe(18); sources_json=json.dumps(sources or [])
+    if "i don't have that information on the site" in (answer or '').lower():
+        answer_status = 'unanswered'
     normalized_question = ' '.join(question.lower().split())
     topic = _topic_for(question)
     conversation_id=create_conversation(tenant_id,conversation_id,visitor_id=visitor_id,source_page_url=source_page_url)
@@ -149,7 +151,7 @@ def unanswered(tenant_id: str, limit=50, date_from=None, date_to=None, search=''
 def most_asked(tenant_id: str, limit=50, date_from=None, date_to=None, search=''):
     start,end=_range_bounds(date_from,date_to); where=['qg.tenant_id=%s','m.created_at >= %s','m.created_at < %s']; args=[tenant_id,start,end]
     if search: where.append('(qg.representative_question ILIKE %s OR qg.group_name ILIKE %s)'); args += [f'%{search}%',f'%{search}%']
-    with db._get_pool().connection() as c:return c.execute('SELECT qg.id,qg.group_name,qg.representative_question,count(m.id) AS question_count,max(m.created_at) AS last_asked FROM question_groups qg JOIN question_group_members m ON m.group_id=qg.id WHERE '+' AND '.join(where)+' GROUP BY qg.id,qg.group_name,qg.representative_question ORDER BY question_count DESC,last_asked DESC LIMIT %s',args+[limit]).fetchall()
+    with db._get_pool().connection() as c:return c.execute("SELECT qg.id,qg.group_name,qg.representative_question,count(m.id) AS question_count,max(m.created_at) AS last_asked,count(*) FILTER (WHERE a.answer_status <> 'answered') AS unanswered_count,CASE WHEN count(*) FILTER (WHERE a.answer_status <> 'answered') > 0 THEN 'Needs review' ELSE 'Answered' END AS answer_status FROM question_groups qg JOIN question_group_members m ON m.group_id=qg.id JOIN chat_analytics a ON a.id=m.analytics_id WHERE "+' AND '.join(where)+" GROUP BY qg.id,qg.group_name,qg.representative_question ORDER BY question_count DESC,last_asked DESC LIMIT %s",args+[limit]).fetchall()
 
 def topics(tenant_id: str, date_from=None, date_to=None):
     start,end=_range_bounds(date_from,date_to)
