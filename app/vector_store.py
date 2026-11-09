@@ -11,7 +11,7 @@ class VectorStore(ABC):
     @abstractmethod
     def delete_documents(self, chatbot_id: str, document_ids: list[str], version: int) -> None: ...
     @abstractmethod
-    def similarity_search(self, chatbot_id: str, embedding: list[float], top_k: int) -> list[dict]: ...
+    def similarity_search(self, chatbot_id: str, embedding: list[float], top_k: int, query_text: str = "") -> list[dict]: ...
     @abstractmethod
     def delete_chatbot_documents(self, chatbot_id: str) -> None: ...
     @abstractmethod
@@ -85,14 +85,28 @@ class PgVectorStore(VectorStore):
                 conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version NOT IN (%s,%s)",(chatbot_id,version,previous_version))
                 conn.execute("DELETE FROM chatbot_documents WHERE chatbot_id=%s AND knowledge_version=%s",(chatbot_id,previous_version))
 
-    def similarity_search(self, chatbot_id, embedding, top_k):
+    def similarity_search(self, chatbot_id, embedding, top_k, query_text=""):
         from . import db
         vector=str(embedding)
+        # Combine vector similarity with PostgreSQL lexical relevance. The
+        # lexical component is important for short queries such as "pricing",
+        # where an embedding alone can rank generic pages above an exact match.
+        lexical_query = query_text.strip() or "__no_matching_query__"
         with db.connection() as conn:
-            rows=conn.execute("""SELECT d.content,d.source_url,d.title,1-(d.embedding <=> %s::vector) AS score
+            rows=conn.execute("""SELECT d.content,d.source_url,d.title,
+                    1-(d.embedding <=> %s::vector) AS vector_score,
+                    ts_rank_cd(
+                        to_tsvector('simple', coalesce(d.title,'') || ' ' || coalesce(d.source_url,'') || ' ' || d.content),
+                        websearch_to_tsquery('simple', %s)
+                    ) AS lexical_score
                 FROM chatbot_documents d JOIN knowledge_bases k ON k.chatbot_id=d.chatbot_id AND k.knowledge_base_version=d.knowledge_version
-                WHERE d.chatbot_id=%s ORDER BY d.embedding <=> %s::vector LIMIT %s""",(vector,chatbot_id,vector,top_k)).fetchall()
-        return [{"text":r["content"],"url":r["source_url"],"title":r["title"],"score":float(r["score"])} for r in rows]
+                WHERE d.chatbot_id=%s
+                ORDER BY (1-(d.embedding <=> %s::vector)) + (0.35 * ts_rank_cd(
+                    to_tsvector('simple', coalesce(d.title,'') || ' ' || coalesce(d.source_url,'') || ' ' || d.content),
+                    websearch_to_tsquery('simple', %s)
+                )) DESC
+                LIMIT %s""",(vector,lexical_query,chatbot_id,vector,lexical_query,top_k)).fetchall()
+        return [{"text":r["content"],"url":r["source_url"],"title":r["title"],"score":float(r["vector_score"]),"lexical_score":float(r["lexical_score"])} for r in rows]
 
 
 def get_vector_store() -> VectorStore:

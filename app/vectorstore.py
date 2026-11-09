@@ -46,5 +46,15 @@ def index_documents(chatbot_id,records,*,chunk_fn,version):
     store.sync_documents(chatbot_id,docs,version,previous_version)
     return len(docs)
 
+def _retrieval_query(question: str) -> str:
+    """Add useful retrieval context for short, ambiguous commercial questions."""
+    normalized = question.lower()
+    pricing_terms = ("price", "pricing", "cost", "plan", "plans", "fee", "fees", "subscription")
+    if any(term in normalized for term in pricing_terms):
+        return f"{question}\nPricing plans, prices, costs, setup fees, subscriptions, and billing options"
+    return question
+
+
 def query(chatbot_id,question,*,top_k):
-    return get_vector_store().similarity_search(chatbot_id,_embed([question])[0],top_k)
+    retrieval_query = _retrieval_query(question)
+    return get_vector_store().similarity_search(chatbot_id,_embed([retrieval_query])[0],top_k,query_text=question)
